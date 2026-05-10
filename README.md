@@ -98,7 +98,7 @@ Processes communicate via:
 
 ```bash
 git clone https://github.com/iamsoln/selfmemer.git
-cd dankbot-dashboard
+cd selfmemer
 ```
 
 **Install Node dependencies**
