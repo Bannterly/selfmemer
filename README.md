@@ -1,6 +1,6 @@
-# DankBot Dashboard
+# Self Memer
 
-A self-hosted, multi-account automation dashboard for the Dank Memer Discord bot. Manages multiple accounts from a single web interface, tracks balance history over time, and coordinates item transfers between accounts using a mothership system.
+A self-hosted, multi-account automation script for the Dank Memer Discord bot. Manages multiple accounts from a single web interface, tracks balance history over time, and coordinates item transfers between accounts using a mothership system.
 
 ---
 
