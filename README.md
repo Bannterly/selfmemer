@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/github/stars/iamsoln/selfmemer?style=flat-square">
   <img src="https://img.shields.io/github/forks/iamsoln/selfmemer?style=flat-square">
   <img src="https://img.shields.io/github/issues/iamsoln/selfmemer?style=flat-square">
-  <img src="https://img.shields.io/github/license/iamsoln/selfmemer?style=flat-square">
+  <img src="https://img.shields.io/github/license/iamsoln/selfmemer/LICENSE.md?style=flat-square">
   <img src="https://img.shields.io/github/last-commit/iamsoln/selfmemer?style=flat-square">
 </p>
 
