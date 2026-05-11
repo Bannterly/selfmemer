@@ -7,7 +7,6 @@
             "channel_id": "YOUR_CHANNEL_ID_HERE",
             "bot_id": "270904126974590976",
             "discord_uid": "",
-            "bal_tracker_enabled": true,
             "cooldown": 20,
             "search_cooldown": 25,
             "beg_cooldown": 40,
@@ -18,8 +17,11 @@
             "wait_for_response": 10,
             "adv_cooldown": 1800,
             "adv_type": "Pepe Goes to Space",
-            "search_risk": "low",
-            "crime_risk": "low",
+            "search_risk": "medium",
+            "crime_risk": "medium",
+            "fish_sell_currency": "coins",
+            "disable_interaction_lock": false,
+            "bal_tracker_enabled": true,
             "commands_enabled": {
                 "hunt": true,
                 "dig": true,
@@ -28,8 +30,23 @@
                 "crime": false,
                 "hl": false,
                 "pm": false,
-                "adv": false
-            }
+                "adv": false,
+                "fish": false
+            },
+            "market_sniper_enabled": false,
+            "market_sniper_cooldown": 30,
+            "market_sniper_items": [
+                {
+                    "name": "lifesaver",
+                    "max_price": 200000,
+                    "buy_qty": 5
+                }
+            ],
+            "market_study_item": "apple",
+            "limit_flags": false,
+            "stealth_mode": "moderate",
+            "cycle_uptime_mins": 0,
+            "cycle_downtime_mins": 0
         }
     ],
     "mothership_id": null
