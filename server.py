@@ -18,7 +18,7 @@ NUMERIC_FIELDS = [
 ]
 RISK_FIELDS  = ["search_risk", "crime_risk"]
 VALID_RISK   = {"low", "medium", "high"}
-COMMAND_KEYS = ["hunt", "dig", "search", "beg", "crime", "hl", "pm", "adv"]
+COMMAND_KEYS = ["hunt", "dig", "search", "beg", "crime", "hl", "pm", "adv", "fish"]
 
 VALID_ADV_TYPES = [
     "Pepe Goes to Space",
@@ -41,6 +41,11 @@ DEFAULT_ACCOUNT = {
         "hunt": True, "dig": True, "search": True,
         "beg": True, "crime": True, "hl": True, "pm": True, "adv": False,
     },
+    # ── Stealth / anti-detection ──────────────────────────────
+    "limit_flags":        False,
+    "stealth_mode":       "moderate",
+    "cycle_uptime_mins":  0,
+    "cycle_downtime_mins": 0,
 }
 
 # ── Config helpers ─────────────────────────────────────────
@@ -70,11 +75,85 @@ _log_lock   = threading.Lock()
 _log_buffer = collections.deque(maxlen=500)
 _heartbeat  = {}   # source -> unix timestamp
 
+# ── Fish stats ─────────────────────────────────────────────
+_fish_stats = {}   # account_id -> {session_start, catches: {name: count}, sells: int, timeline: [...]}
+_fish_lock  = threading.Lock()
+
+# ── Market Sniper stats ─────────────────────────────────────
+_sniper_stats = {}  # account_id -> {session_start, buys: [{item, price, qty, ts}]}
+_sniper_lock  = threading.Lock()
+
+def _make_sniper_state():
+    return {"session_start": time.time(), "buys": []}
+
+def _update_sniper_from_log(source, msg):
+    parts = source.split(":")
+    account_id = parts[-1] if len(parts) >= 2 else None
+    if not account_id:
+        return
+    if not msg.startswith("[SNIPER:BUY] "):
+        return
+    rest   = msg[len("[SNIPER:BUY] "):]
+    tokens = rest.rsplit(None, 2)
+    if len(tokens) < 3:
+        return
+    item = tokens[0]
+    try:
+        price = int(tokens[1])
+        qty   = int(tokens[2])
+    except Exception:
+        return
+    with _sniper_lock:
+        if account_id not in _sniper_stats:
+            _sniper_stats[account_id] = _make_sniper_state()
+        _sniper_stats[account_id]["buys"].append({
+            "item": item, "price": price, "qty": qty,
+            "ts": int(time.time() * 1000),
+        })
+        if len(_sniper_stats[account_id]["buys"]) > 200:
+            _sniper_stats[account_id]["buys"] = _sniper_stats[account_id]["buys"][-200:]
+
+def _make_fish_state():
+    return {"session_start": time.time(), "catches": {}, "sells": 0, "timeline": []}
+
+def _get_fish_stats(account_id):
+    with _fish_lock:
+        if account_id not in _fish_stats:
+            _fish_stats[account_id] = _make_fish_state()
+        return dict(_fish_stats[account_id])
+
+def _update_fish_from_log(source, msg):
+    # source looks like "MAIN:acc-xxxx"
+    parts = source.split(":")
+    account_id = parts[-1] if len(parts) >= 2 else None
+    if not account_id:
+        return
+    with _fish_lock:
+        if account_id not in _fish_stats:
+            _fish_stats[account_id] = _make_fish_state()
+        s = _fish_stats[account_id]
+        changed = False
+        if msg.startswith("[FISH:CATCH] "):
+            name = msg[len("[FISH:CATCH] "):].strip()
+            if name:
+                s["catches"][name] = s["catches"].get(name, 0) + 1
+                changed = True
+        elif msg.startswith("[FISH:SELL]"):
+            s["sells"] += 1
+            changed = True
+        if changed:
+            ts = int(time.time() * 1000)
+            s["timeline"].append({"ts": ts, "fish": dict(s["catches"]), "sells": s["sells"]})
+            if len(s["timeline"]) > 300:
+                s["timeline"] = s["timeline"][-300:]
+
 def _add_log(level, source, msg):
     entry = {"ts": int(time.time() * 1000), "level": level, "source": source, "msg": msg}
     with _log_lock:
         _log_buffer.append(entry)
         _heartbeat[source] = time.time()
+    _update_fish_from_log(source, msg)
+    _update_sniper_from_log(source, msg)
 
 # ── Routes ─────────────────────────────────────────────────
 
@@ -149,6 +228,20 @@ def update_account(account_id):
             for cmd in COMMAND_KEYS:
                 if cmd in data["commands_enabled"]:
                     account["commands_enabled"][cmd] = bool(data["commands_enabled"][cmd])
+        if "bal_tracker_enabled" in data:
+            account["bal_tracker_enabled"] = bool(data["bal_tracker_enabled"])
+        if "fish_sell_currency" in data and data["fish_sell_currency"] in ("coins", "tokens"):
+            account["fish_sell_currency"] = data["fish_sell_currency"]
+        if "disable_interaction_lock" in data:
+            account["disable_interaction_lock"] = bool(data["disable_interaction_lock"])
+        if "limit_flags" in data:
+            account["limit_flags"] = bool(data["limit_flags"])
+        if "stealth_mode" in data and data["stealth_mode"] in ("strict", "moderate", "casual", "fast"):
+            account["stealth_mode"] = data["stealth_mode"]
+        if "cycle_uptime_mins" in data and isinstance(data["cycle_uptime_mins"], (int, float)):
+            account["cycle_uptime_mins"] = max(0, int(data["cycle_uptime_mins"]))
+        if "cycle_downtime_mins" in data and isinstance(data["cycle_downtime_mins"], (int, float)):
+            account["cycle_downtime_mins"] = max(0, int(data["cycle_downtime_mins"]))
         cfg["accounts"][i] = account
         break
     save_config(cfg)
@@ -209,9 +302,104 @@ def get_status():
 
 # ── Adventure types ────────────────────────────────────────
 
+@app.route("/api/fish-stats/<account_id>", methods=["GET"])
+def get_fish_stats(account_id):
+    s = _get_fish_stats(account_id)
+    return jsonify({
+        "session_start":  s["session_start"],
+        "catches":        s["catches"],
+        "total_catches":  sum(s["catches"].values()),
+        "sells":          s["sells"],
+        "timeline":       s.get("timeline", []),
+    })
+
+@app.route("/api/fish-stats/<account_id>", methods=["DELETE"])
+def reset_fish_stats(account_id):
+    with _fish_lock:
+        _fish_stats[account_id] = _make_fish_state()
+    return jsonify({"ok": True})
+
 @app.route("/api/adv-types", methods=["GET"])
 def get_adv_types():
     return jsonify(VALID_ADV_TYPES)
+
+# ── Market Sniper config + stats ─────────────────────────────
+
+@app.route("/api/accounts/<account_id>/market-sniper", methods=["GET"])
+def get_market_sniper(account_id):
+    acc = find_account(account_id)
+    if not acc:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    return jsonify({
+        "enabled":  acc.get("market_sniper_enabled", False),
+        "items":    acc.get("market_sniper_items", []),
+        "cooldown": acc.get("market_sniper_cooldown", 60),
+    })
+
+@app.route("/api/accounts/<account_id>/market-sniper", methods=["POST"])
+def save_market_sniper(account_id):
+    data = request.get_json(silent=True) or {}
+    cfg  = load_config()
+    for i, a in enumerate(cfg.get("accounts", [])):
+        if a["id"] != account_id:
+            continue
+        if "enabled" in data:
+            a["market_sniper_enabled"] = bool(data["enabled"])
+        if "items" in data and isinstance(data["items"], list):
+            a["market_sniper_items"] = [
+                {
+                    "name":      str(it.get("name", ""))[:50].strip(),
+                    "max_price": max(0, int(it.get("max_price", 0))),
+                    "buy_qty":   max(1, min(50, int(it.get("buy_qty", 1) or 1))),
+                }
+                for it in data["items"][:20]
+                if str(it.get("name", "")).strip() and int(it.get("max_price", 0)) > 0
+            ]
+        if "cooldown" in data:
+            v = int(data["cooldown"])
+            if v >= 5:
+                a["market_sniper_cooldown"] = v
+        cfg["accounts"][i] = a
+        break
+    save_config(cfg)
+    return jsonify({"ok": True})
+
+@app.route("/api/market-sniper-stats/<account_id>", methods=["GET"])
+def get_market_sniper_stats(account_id):
+    with _sniper_lock:
+        s    = _sniper_stats.get(account_id, _make_sniper_state())
+        buys = list(s.get("buys", []))
+    total_coins = sum(b["price"] * b["qty"] for b in buys)
+    return jsonify({
+        "session_start":    s.get("session_start", time.time()),
+        "total_buys":       len(buys),
+        "total_coins_spent": total_coins,
+        "recent_buys":      buys[-10:],
+    })
+
+@app.route("/api/accounts/<account_id>/sniper-event", methods=["POST"])
+def sniper_event(account_id):
+    data  = request.get_json(silent=True) or {}
+    item  = str(data.get("item",  ""))[:50]
+    price = int(data.get("price", 0))
+    qty   = int(data.get("qty",   1))
+    if item and price > 0:
+        with _sniper_lock:
+            if account_id not in _sniper_stats:
+                _sniper_stats[account_id] = _make_sniper_state()
+            _sniper_stats[account_id]["buys"].append({
+                "item": item, "price": price, "qty": qty,
+                "ts": int(time.time() * 1000),
+            })
+            if len(_sniper_stats[account_id]["buys"]) > 200:
+                _sniper_stats[account_id]["buys"] = _sniper_stats[account_id]["buys"][-200:]
+    return jsonify({"ok": True})
+
+@app.route("/api/market-sniper-stats/<account_id>", methods=["DELETE"])
+def reset_market_sniper_stats(account_id):
+    with _sniper_lock:
+        _sniper_stats[account_id] = _make_sniper_state()
+    return jsonify({"ok": True})
 
 # ── Mothership ─────────────────────────────────────────────
 
