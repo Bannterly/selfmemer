@@ -1,19 +1,20 @@
-# Self Memer
+![SelfMemer](docs/selfmemer.png)
 
-A self-hosted, multi-account automation script for the Dank Memer Discord bot. Manages multiple accounts from a single web interface, tracks balance history over time, and coordinates item transfers between accounts using a mothership system.
+# SelfMemer Dashboard
+
+A self-hosted, multi-account automation dashboard for Dank Memer on Discord. Runs any number of accounts simultaneously from a single web UI, tracks balance and net worth over time, snipers the market, and coordinates inventory transfers between accounts using a mothership system, all with built-in anti-detection.
 
 ---
 
-## Table of contents
+## Table of Contents
 
 - [Features](#features)
+- [Screenshots](#screenshots)
 - [Architecture](#architecture)
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Getting your Discord token](#getting-your-discord-token)
-- [Dashboard overview](#dashboard-overview)
-- [How the bot works](#how-the-bot-works)
 - [Security](#security)
 - [License](#license)
 
@@ -21,29 +22,116 @@ A self-hosted, multi-account automation script for the Dank Memer Discord bot. M
 
 ## Features
 
-**Multi-account management**
-Run any number of accounts simultaneously. Each account gets its own bot process, balance tracker process, and dashboard tab. Accounts are fully isolated from one another.
+- **Multi-account management** — each account gets its own isolated bot process, balance tracker, and dashboard tab
+- **Live command toggles** — enable or disable hunt, dig, search, beg, crime, higher/lower, post meme, adventure, and fishing per account without restarting
+- **Market Sniper** — automatically scans `pls market view` and buys coin listings below your configured max price per item
+- **Fishing mode** — exclusive fishing loop with live catch stats, per-species chart, and configurable sell currency
+- **Balance & net worth tracking** — 30-second polling with historical charts for wallet, bank, and net worth
+- **Mothership transfer system** — designate one account as the fleet command; support vessels can send their full inventory and wallet in one click
+- **Stealth / anti-detection** — four preset modes (Strict / Moderate / Casual / Fast) controlling typing simulation, cooldown jitter, and uptime/downtime cycling
+- **Browser fingerprint** — always-on Chrome 103 / Chrome OS UA, `x-super-properties`, all `Sec-*` headers, dynamic Referer — replicates a real browser session regardless of other settings
+- **Risk mode** — per-account Low / Medium / High risk setting for search and crime that maps to different response choices
+- **Adventure automation** — plays chosen adventure type end-to-end, auto-calculates cooldown from interaction count
+- **Cooldown control** — all timing values editable live from the dashboard, saved and hot-reloaded without restart
+- **Activity log** — live feed with All / Main / Balance / Warnings filters and per-entry source tagging
 
-**Live command control**
-Toggle hunt, dig, search, beg, crime, higher/lower, post meme, and adventure on or off per account from the dashboard. Changes take effect immediately without restarting anything.
+---
 
-**Balance and net worth tracking**
-A dedicated tracker process runs `pls bal` every 30 seconds and records wallet, bank, and net worth history. The dashboard displays live charts for each account.
+## Screenshots
 
-**Mothership transfer system**
-Designate one account as the mothership. Any other account can send its entire inventory and wallet to the mothership in one click. The transfer loop works through the inventory automatically, skipping non-tradeable and blacklisted items.
+### Connection & Bot Status
 
-**Risk mode**
-Search and crime commands support low, medium, and high risk settings, each mapped to a specific set of response choices. Configurable per account from the dashboard.
+Account credentials, one-click save-and-restart, and live status cards. Browser Fingerprint is always active, independent of any toggle.
 
-**Adventure automation**
-Runs a chosen adventure type on a configurable cooldown. The bot plays through all interaction prompts automatically and adjusts the next cooldown based on how many interactions the run had. An additional 60-second buffer is added after each run.
+![Connection and Bot Status](docs/connection.png)
 
-**Activity log**
-A live log of every bot action — commands sent, responses received, buttons clicked, warnings, and errors — with source tagging and filter controls.
+---
 
-**Hot reload**
-Editing and saving connection settings in the dashboard restarts only the affected account's bot processes. Other accounts keep running.
+### Mothership — Primary Account
+
+The designated mothership account is highlighted. Other accounts can transfer their full inventory and coins to it in one click.
+
+![Mothership Primary](docs/mothership-primary.png)
+
+---
+
+### Mothership — Support Vessel
+
+Support vessel accounts show which mothership they belong to and expose transfer buttons.
+
+![Mothership Support Vessel](docs/mothership-support.png)
+
+---
+
+### Commands
+
+Toggle any of the 8 command loops on or off live. Changes take effect on the next cycle, no restart needed.
+
+![Commands](docs/commands.png)
+
+---
+
+### Balance & Net Worth Tracker
+
+Wallet, bank, and net worth polled every 30 seconds with full historical charts per account.
+
+![Balance and Net Worth](docs/balance.png)
+
+---
+
+### Stealth Settings
+
+Four anti-detection presets. Casual mode shown: 40% typing chance, 100–300ms delay, 10% cooldown variance. Uptime/Downtime cycle configured to 30min active / 10min rest.
+
+![Stealth Settings](docs/stealth.png)
+
+---
+
+### Market Sniper
+
+Scans `pls market view` on a configurable interval and auto-buys coin listings under your max price per item. Live buy history with per-item totals.
+
+![Market Sniper](docs/market-sniper.png)
+
+---
+
+### Fishing Mode
+
+Exclusive fishing loop, pauses all other commands and the balance tracker while active. Live stats: catches per species, bucket sells, and session time with a chart.
+
+![Fishing](docs/fishing.png)
+
+---
+
+### Adventure
+
+Select adventure type from a dropdown. Cooldown is calculated automatically after each run based on interaction count, with a 60-second safety buffer.
+
+![Adventure](docs/adventure.png)
+
+---
+
+### Risk Mode
+
+Per-account risk level for search and crime. Each level maps to a different set of response choices.
+
+![Risk Mode](docs/risk-mode.png)
+
+---
+
+### Cooldowns & Timing
+
+All timing values in one place. Auto-saved on change, hot-reloaded into the bot within 5 seconds.
+
+![Cooldowns](docs/cooldowns.png)
+
+---
+
+### Activity Log
+
+Live feed of every bot action, commands sent, responses received, button clicks, sniper events, stealth delays, warnings, and errors.
+
+![Activity Log](docs/activity-log.png)
 
 ---
 
@@ -53,33 +141,33 @@ Editing and saving connection settings in the dashboard restarts only the affect
 start.sh
   |
   |-- manager.js          Spawns and supervises all bot processes.
-  |     |                 Watches config.json for changes and hot-reloads
+  |     |                 Watches config.json every 5s and hot-reloads
   |     |                 individual accounts without full restarts.
   |     |
-  |     |-- main.js       One instance per account. Runs the command loops
-  |     |                 (hunt, dig, search, etc.), handles Dank Memer
-  |     |                 responses, and executes mothership transfers.
+  |     |-- main.js       One instance per account. Runs all command loops
+  |     |                 (hunt, dig, search, beg, crime, hl, pm, adv, fish),
+  |     |                 market sniper, mothership transfers, stealth logic,
+  |     |                 and browser fingerprint headers.
   |     |
   |     `-- bal_tracker.js  One instance per account. Sends pls bal every
-  |                         30 seconds, clicks the Net Worth button, and
-  |                         records history to balance_{id}.json.
+  |                         30 seconds, clicks Net Worth, records history
+  |                         to balance_{id}.json.
   |
-  `-- server.py           Flask server. Serves the dashboard frontend,
-                          provides the REST API consumed by the UI, and
-                          reads/writes config.json.
+  `-- server.py           Flask server on port 5000. Serves the dashboard,
+                          provides the REST API, reads/writes config.json.
 
 web/
   index.html              Single-page dashboard.
-  styles.css              All styles, including dark mode and responsive
-                          layouts for mobile and desktop.
-  scripts.js              Dashboard logic: polling, chart rendering,
-                          account switching, toggle handling.
+  styles.css              All styles — dark mode, responsive layout.
+  scripts.js              Polling, chart rendering, account switching,
+                          toggle and config save logic.
 ```
 
-Processes communicate via:
-- **HTTP** — `main.js` and `bal_tracker.js` post log entries and account data to the Flask API
-- **File-based interaction lock** — `main.js` writes a lock file while it holds the command mutex; `bal_tracker.js` polls this file before sending `pls bal` to avoid sending two commands to the same account at the same time
-- **Transfer trigger files** — the dashboard writes a trigger file to request a transfer; `main.js` polls for this file and picks it up on the next cycle
+**Inter-process communication:**
+- `main.js` and `bal_tracker.js` POST log entries and stats to the Flask API over localhost HTTP
+- A file-based interaction lock prevents `bal_tracker.js` from sending `pls bal` while a command is in-flight
+- Transfer trigger files let the dashboard request a mothership transfer; `main.js` picks them up on the next cycle
+- Config hot-reload: `main.js` reads `config.json` every 5 seconds and applies changed fields without restarting
 
 ---
 
@@ -87,7 +175,7 @@ Processes communicate via:
 
 - Node.js 18 or later
 - Python 3.10 or later
-- pip packages: `flask`
+- `flask` Python package
 - A Discord account with a valid user token
 
 ---
@@ -101,11 +189,16 @@ git clone https://github.com/iamsoln/selfmemer.git
 cd selfmemer
 ```
 
+**Stop git from tracking your config (run once after cloning)**
+
+```bash
+git rm --cached config.json
+```
+
 **Install Node dependencies**
 
 ```bash
 npm install
-npm install djs-selfbot-v13
 ```
 
 **Install Python dependencies**
@@ -120,7 +213,7 @@ pip install flask
 cp config.example.json config.json
 ```
 
-Then open `config.json` and fill in your account details. See the [Configuration](#configuration) section for a full reference.
+Open `config.json` and fill in your account details. See [Configuration](#configuration) below.
 
 **Start the dashboard**
 
@@ -128,148 +221,101 @@ Then open `config.json` and fill in your account details. See the [Configuration
 bash start.sh
 ```
 
-Open `http://localhost:5000` in your browser. The dashboard will show your accounts and begin running the enabled commands immediately.
+Open `http://localhost:5000`. The dashboard connects to your accounts and begins running enabled commands immediately.
 
 ---
 
 ## Configuration
 
-`config.json` is not tracked by version control because it contains your Discord token. Use `config.example.json` as the reference — it shows the full structure with placeholder values.
+`config.json` is excluded from version control — it contains your Discord token. Use `config.example.json` as the reference template.
 
 ### Account fields
 
-| Field | Type | Description |
-|---|---|---|
-| `id` | string | Unique identifier for this account. Used in file names and API paths. Example: `acc-1` |
-| `name` | string | Display name shown in the dashboard tab |
-| `token` | string | Discord user token |
-| `channel_id` | string | ID of the channel where Dank Memer commands are sent |
-| `bot_id` | string | Dank Memer's bot ID. Default: `270904126974590976` |
-| `discord_uid` | string | Populated automatically on first run. Leave blank |
-| `bal_tracker_enabled` | boolean | Whether to run the balance tracker for this account |
-| `cooldown` | number | Seconds between hunt and dig commands |
-| `search_cooldown` | number | Seconds between search commands |
-| `beg_cooldown` | number | Seconds between beg commands |
-| `crime_cooldown` | number | Seconds between crime commands |
-| `hl_cooldown` | number | Seconds between higher/lower commands |
-| `hl_wait_for` | number | Seconds to wait for a higher/lower response |
-| `pm_cooldown` | number | Seconds between post meme commands |
-| `wait_for_response` | number | Seconds to wait before timing out any command |
-| `adv_cooldown` | number | Base adventure cooldown in seconds. Default: `1800` |
-| `adv_type` | string | Which adventure to run. Must match the in-game name exactly |
-| `search_risk` | string | Risk level for search choices: `low`, `medium`, or `high` |
-| `crime_risk` | string | Risk level for crime choices: `low`, `medium`, or `high` |
-| `commands_enabled` | object | Keys: `hunt`, `dig`, `search`, `beg`, `crime`, `hl`, `pm`, `adv`. Values: `true` or `false` |
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `id` | string | — | Unique identifier. Example: `acc-1` |
+| `name` | string | — | Display name in the dashboard |
+| `token` | string | — | Discord user token |
+| `channel_id` | string | — | Channel where Dank Memer commands are sent |
+| `bot_id` | string | `270904126974590976` | Dank Memer's bot ID |
+| `discord_uid` | string | `""` | Auto-populated on first run. Leave blank |
+| `bal_tracker_enabled` | boolean | `true` | Run balance tracker for this account |
+| `cooldown` | number | `20` | Seconds between hunt / dig commands |
+| `search_cooldown` | number | `25` | Seconds between search commands |
+| `beg_cooldown` | number | `40` | Seconds between beg commands |
+| `crime_cooldown` | number | `40` | Seconds between crime commands |
+| `hl_cooldown` | number | `10` | Seconds between higher/lower commands |
+| `hl_wait_for` | number | `5` | Seconds to wait for a higher/lower response |
+| `pm_cooldown` | number | `20` | Seconds between post meme commands |
+| `wait_for_response` | number | `10` | Command response timeout in seconds |
+| `adv_cooldown` | number | `1800` | Base adventure cooldown in seconds |
+| `adv_type` | string | — | Adventure name exactly as shown in-game |
+| `search_risk` | string | `medium` | `low`, `medium`, or `high` |
+| `crime_risk` | string | `medium` | `low`, `medium`, or `high` |
+| `fish_sell_currency` | string | `coins` | `coins` or `tokens` |
+| `disable_interaction_lock` | boolean | `false` | Disable the single-command mutex (premium servers) |
+| `commands_enabled` | object | — | Keys: `hunt` `dig` `search` `beg` `crime` `hl` `pm` `adv` `fish`. Values: `true`/`false` |
+| `market_sniper_enabled` | boolean | `false` | Enable the market sniper |
+| `market_sniper_cooldown` | number | `30` | Seconds between full market scans |
+| `market_sniper_items` | array | `[]` | Watch list — see below |
+| `market_study_item` | string | `apple` | Item used for market price research |
+| `limit_flags` | boolean | `false` | Enable behavioral anti-detection (typing delays, jitter, cycling) |
+| `stealth_mode` | string | `moderate` | `strict`, `moderate`, `casual`, or `fast` |
+| `cycle_uptime_mins` | number | `0` | Minutes to run before pausing. 0 = disabled |
+| `cycle_downtime_mins` | number | `0` | Minutes to pause before resuming. 0 = disabled |
+
+### Market sniper item entry
+
+```json
+{
+    "name": "lifesaver",
+    "max_price": 200000,
+    "buy_qty": 5
+}
+```
+
+`name` must match the item name exactly as Dank Memer displays it. `max_price` is in coins per unit. `buy_qty` is the maximum quantity to buy per snipe event.
+
+### Stealth mode presets
+
+| Mode | Typing chance | Typing delay | CD variance | Speed |
+|---|---|---|---|---|
+| `strict` | 100% | 700–1400ms | ±35% | Slowest |
+| `moderate` | 80% | 300–600ms | ±20% (biased low) | Moderate |
+| `casual` | 40% | 100–300ms | ±10% (heavily biased) | Fast |
+| `fast` | 0% | None | None | Maximum |
+
+Browser fingerprint headers (Chrome 103 / Chrome OS UA, `x-super-properties`, all `Sec-*` headers) are **always active** and are not affected by `limit_flags` or stealth mode.
 
 ### Root fields
 
 | Field | Type | Description |
 |---|---|---|
 | `accounts` | array | List of account objects |
-| `mothership_id` | string or null | The `id` of the account that receives transfers |
-
-### Example
-
-```json
-{
-    "accounts": [
-        {
-            "id": "acc-1",
-            "name": "MyAccount",
-            "token": "YOUR_TOKEN_HERE",
-            "channel_id": "YOUR_CHANNEL_ID",
-            "bot_id": "270904126974590976",
-            "discord_uid": "",
-            "bal_tracker_enabled": true,
-            "cooldown": 20,
-            "search_cooldown": 25,
-            "beg_cooldown": 40,
-            "crime_cooldown": 40,
-            "hl_cooldown": 10,
-            "hl_wait_for": 5,
-            "pm_cooldown": 20,
-            "wait_for_response": 10,
-            "adv_cooldown": 1800,
-            "adv_type": "Pepe Goes to Space",
-            "search_risk": "low",
-            "crime_risk": "low",
-            "commands_enabled": {
-                "hunt": true,
-                "dig": true,
-                "search": true,
-                "beg": false,
-                "crime": false,
-                "hl": false,
-                "pm": false,
-                "adv": false
-            }
-        }
-    ],
-    "mothership_id": null
-}
-```
+| `mothership_id` | string or null | `id` of the account that receives transfers |
 
 ---
 
 ## Getting your Discord token
 
-1. Open Discord in a web browser at `discord.com`. Do not use the desktop app.
-2. Press `F12` to open the developer tools.
+1. Open Discord in a **web browser** at `discord.com`. Do not use the desktop app.
+2. Press `F12` to open developer tools.
 3. Go to the **Network** tab and set the filter to **Fetch/XHR**.
 4. Send any message in any channel.
-5. Click one of the requests that appears in the list. Open the **Headers** section and look for `Authorization` under **Request Headers**. That value is your token.
+5. Click one of the requests that appears. Open **Headers** → **Request Headers** → find `Authorization`. That value is your token.
 
-Your token gives complete access to your Discord account. Do not share it with anyone, do not paste it anywhere other than your local `config.json`, and do not commit `config.json` to version control.
-
----
-
-## Dashboard overview
-
-**Account tabs** — Switch between accounts. The active account's dot pulses green when its bot is online. The mothership account is highlighted in amber.
-
-**Mothership card** — Shows whether the current account is the mothership or a support vessel. From here you can assign or transfer the mothership role.
-
-**Transfer card** — Visible only on support vessel accounts. Sends the account's full inventory and wallet to the mothership. Progress is shown in a status bar below the buttons.
-
-**Connection card** — Edit the account's token, channel, and bot ID. Saving restarts only that account's bot processes.
-
-**Bot Status** — Shows whether the main bot and balance tracker are running. The balance tracker can be toggled on or off independently.
-
-**Balance and Net Worth** — Live charts that update every 30 seconds. Shows wallet, bank, and total balance. A separate chart tracks net worth over time.
-
-**Commands** — Toggle each command on or off. Changes apply on the next command cycle.
-
-**Adventure** — Select the adventure type from a dropdown. The cooldown is calculated automatically based on run length and includes a 60-second safety buffer.
-
-**Risk Mode** — Set search and crime to low, medium, or high risk. Each level maps to a different set of response choices.
-
-**Activity Log** — Live feed of bot activity. Filter by source (main bot, balance tracker) or level (warnings only). Logs persist across tab switches for the current session.
-
-**Cooldowns** — Edit all timing values directly. Changes are saved and applied immediately.
-
----
-
-## How the bot works
-
-Each account runs two Node.js processes: `main.js` and `bal_tracker.js`.
-
-`main.js` runs the command loops. Each command (hunt, dig, search, etc.) has its own async loop that checks if the command is enabled, acquires an exclusive in-process mutex, sends the command, waits for Dank Memer's reply by matching the reply's message reference ID against the sent message ID, processes the response, and then sleeps for the configured cooldown before repeating.
-
-The mutex ensures only one command is in-flight at a time within a single account. A file-based lock extends this guarantee across `bal_tracker.js`, which checks for the lock file before sending `pls bal`.
-
-`bal_tracker.js` sends `pls bal` on a 30-second interval independently of the main command loops. It records each response to a local JSON file, which the Flask API reads to serve balance history to the dashboard.
-
-Dank Memer responses are identified strictly by message reference ID — the reply must reference the exact message the bot sent. This prevents one account's bot from accidentally consuming a reply meant for another account or another process.
+> Your token gives complete access to your Discord account. Never share it, never commit `config.json`, and never paste it anywhere except your local config file.
 
 ---
 
 ## Security
 
-- `config.json` is in `.gitignore` and will not be committed.
-- Balance history files (`balance_*.json`) are also excluded.
-- Runtime state files (lock files, transfer triggers, transfer status) are excluded.
-- No credentials are logged or transmitted anywhere other than to Discord directly.
-- The Flask server binds to `0.0.0.0:5000` for local use. If you expose this port externally, add authentication.
+- `config.json` is in `.gitignore`, it will not be committed
+- `balance_*.json` history files are also excluded
+- `attached_assets/` is excluded
+- Runtime state files (lock files, transfer triggers) are excluded
+- No credentials are logged or sent anywhere other than directly to Discord
+- The Flask server binds to `0.0.0.0:5000`, if you expose this port externally, add authentication
 
 ---
 
