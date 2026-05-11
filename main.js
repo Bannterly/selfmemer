@@ -2,7 +2,8 @@ const { Client } = require('djs-selfbot-v13');
 const fs   = require('fs');
 const path = require('path');
 const http = require('http');
-const { postLog } = require('./logger');
+const { postLog }    = require('./logger');
+const { detectFish } = require('./fish_detector');
 
 function postToApi(apiPath, data) {
     const body = JSON.stringify(data);
@@ -48,6 +49,16 @@ const _cfg = {
     search_risk:       config.search_risk       ?? 'medium',
     crime_risk:        config.crime_risk        ?? 'medium',
     adv_type:          config.adv_type          ?? 'Pepe Goes to Space',
+    fish_sell_currency:        config.fish_sell_currency        ?? 'coins',
+    disable_interaction_lock:  config.disable_interaction_lock  ?? false,
+    limit_flags:               config.limit_flags               ?? false,
+    stealth_mode:              config.stealth_mode              ?? 'moderate',
+    cycle_uptime_mins:         config.cycle_uptime_mins         ?? 0,
+    cycle_downtime_mins:       config.cycle_downtime_mins       ?? 0,
+    market_study_item:       config.market_study_item       ?? '',
+    market_sniper_enabled:   config.market_sniper_enabled   ?? false,
+    market_sniper_items:     config.market_sniper_items     ?? [],
+    market_sniper_cooldown:  config.market_sniper_cooldown  ?? 60,
     commands_enabled:  config.commands_enabled  ?? {
         hunt: true, dig: true, search: true,
         beg: true, crime: true, hl: true, pm: true, adv: false,
@@ -67,7 +78,9 @@ async function configReloadLoop() {
             for (const key of [
                 'cooldown', 'search_cooldown', 'beg_cooldown', 'crime_cooldown',
                 'hl_cooldown', 'hl_wait_for', 'pm_cooldown', 'wait_for_response',
-                'search_risk', 'crime_risk', 'adv_cooldown', 'adv_type',
+                'search_risk', 'crime_risk', 'adv_cooldown', 'adv_type', 'fish_sell_currency', 'disable_interaction_lock',
+                'limit_flags', 'stealth_mode', 'cycle_uptime_mins', 'cycle_downtime_mins',
+                'market_sniper_enabled', 'market_sniper_cooldown',
             ]) {
                 if (key in fresh && _cfg[key] !== fresh[key]) {
                     log('info', `Hot-reload ${key}: ${_cfg[key]} → ${fresh[key]}`);
@@ -81,6 +94,9 @@ async function configReloadLoop() {
                     }
                     _cfg.commands_enabled[cmd] = val;
                 }
+            }
+            if (fresh.market_sniper_items !== undefined) {
+                _cfg.market_sniper_items = fresh.market_sniper_items;
             }
         } catch (e) {
             log('error', `Config reload failed: ${e.message}`);
@@ -112,9 +128,74 @@ class Mutex {
     }
 }
 
-const client           = new Client({ checkUpdate: false });
+// ── Browser fingerprint ──────────────────────────────────────
+// Matches a real Chrome 103 on Chrome OS session (captured from Discord web client).
+const DISCORD_UA = 'Mozilla/5.0 (X11; CrOS x86_64 14816.131.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.0.0 Safari/537.36';
+
+// x-super-properties: exact structure decoded from real Discord traffic.
+// Identifies the client as a stable-channel Chrome browser, not a bot.
+const _superPropsObj = {
+    os:                       'Chrome OS',
+    browser:                  'Chrome',
+    device:                   '',
+    system_locale:            'en-US',
+    has_client_mods:          false,
+    browser_user_agent:       DISCORD_UA,
+    browser_version:          '103.0.0.0',
+    os_version:               '',
+    referrer:                 '',
+    referring_domain:         '',
+    referrer_current:         '',
+    referring_domain_current: '',
+    release_channel:          'stable',
+    client_build_number:      409397,
+    client_event_source:      null,
+};
+const SUPER_PROPS = Buffer.from(JSON.stringify(_superPropsObj)).toString('base64');
+
+// x-installation-id: per-install stable random ID (snowflake-style).
+// Generated once at process start and reused for the session lifetime.
+const INSTALL_ID = `${Date.now()}${Math.floor(Math.random() * 1_000_000_000)}`;
+
+const client = new Client({
+    checkUpdate: false,
+    ws: {
+        // WS IDENTIFY payload properties — must match the HTTP User-Agent and super-props.
+        properties: {
+            $os:      'Chrome OS',
+            $browser: 'Chrome',
+            $device:  '',
+        },
+    },
+    http: {
+        // REST HTTP headers — replicate every header a real Chrome Discord session sends.
+        headers: {
+            'Accept':             '*/*',
+            'Accept-Language':    'en-US,en;q=0.9',
+            'Referer':            'https://discord.com/channels/@me',
+            'Sec-CH-UA':          '".Not/A)Brand";v="99", "Google Chrome";v="103", "Chromium";v="103"',
+            'Sec-CH-UA-Mobile':   '?0',
+            'Sec-CH-UA-Platform': '"Chrome OS"',
+            'Sec-Fetch-Dest':     'empty',
+            'Sec-Fetch-Mode':     'cors',
+            'Sec-Fetch-Site':     'same-origin',
+            'User-Agent':         DISCORD_UA,
+            'X-Debug-Options':    'bugReporterEnabled',
+            'X-Discord-Locale':   'en-US',
+            'X-Discord-Timezone': 'Asia/Manila',
+            'X-Installation-Id':  INSTALL_ID,
+            'X-Super-Properties': SUPER_PROPS,
+        },
+    },
+});
 const _interactionLock = new Mutex();
 _interactionLock.lockFilePath = path.join(__dirname, `interaction_lock_${ACCOUNT_ID}.lock`);
+
+// Wrapper: bypasses the mutex entirely when disable_interaction_lock is true
+function runWithLock(fn) {
+    if (_cfg.disable_interaction_lock) return fn();
+    return _interactionLock.runExclusive(fn);
+}
 
 function logMessage(message) {
     const content   = message.content || '(none)';
@@ -222,10 +303,59 @@ client.on('messageCreate', message => {
     resolve(message);
 });
 
+// ── Stealth mode presets ─────────────────────────────────────
+// typingRate  : probability of firing a typing indicator (0–1)
+// typingMin   : minimum typing delay in ms
+// typingRange : added random range in ms  (actual = min + rand * range)
+// variancePct : max additive cooldown variance as % of base
+// biasPow     : exponent for random^n  (1 = uniform, 2 = biased low, 3 = heavily biased low)
+const STEALTH_MODES = {
+    strict:   { typingRate: 1.00, typingMin: 700, typingRange: 700, variancePct: 35, biasPow: 1.0 },
+    moderate: { typingRate: 0.80, typingMin: 300, typingRange: 300, variancePct: 20, biasPow: 2.0 },
+    casual:   { typingRate: 0.40, typingMin: 100, typingRange: 200, variancePct: 10, biasPow: 3.0 },
+    fast:     { typingRate: 0.00, typingMin: 0,   typingRange: 0,   variancePct: 0,  biasPow: 2.0 },
+};
+
+// ── Limit Flags helpers ─────────────────────────────────────
+let _botPaused = false;  // set by cycleLoop when in downtime
+
+function _stealthMode() {
+    return STEALTH_MODES[_cfg.stealth_mode] ?? STEALTH_MODES.moderate;
+}
+
+// Additive cooldown variance — distribution biased toward base by biasPow
+function humanJitter(baseMs) {
+    if (!_cfg.limit_flags) return baseMs;
+    const m = _stealthMode();
+    if (m.variancePct === 0) return baseMs;
+    const maxExtra = Math.floor(baseMs * m.variancePct / 100);
+    return baseMs + Math.floor((Math.random() ** m.biasPow) * maxExtra);
+}
+
+async function stealthSendDelay(channel) {
+    if (!_cfg.limit_flags) return;
+    const m = _stealthMode();
+    let typed = false;
+    if (m.typingRate > 0 && Math.random() < m.typingRate) {
+        try { await channel.sendTyping(); typed = true; } catch {}
+    }
+    const delay = m.typingMin > 0 ? m.typingMin + Math.floor(Math.random() * m.typingRange) : 0;
+    if (typed || delay > 0) {
+        log('info', `[STEALTH] ${_cfg.stealth_mode} — ${typed ? 'typing' : 'no typing'}, delay ${delay}ms`);
+    }
+    if (delay > 0) await sleep(delay);
+}
+
+// Dummy for backward compat — cycle replaces the old per-command sleep
+async function stealthExtraSleep() { }
+
 async function sendAndWait(channel, command, timeoutSecs = null) {
     const ms = (timeoutSecs ?? _cfg.wait_for_response) * 1000;
     let resolve;
     const promise = new Promise(res => { resolve = res; });
+
+    // Limit Flags: simulate typing before sending
+    await stealthSendDelay(channel);
 
     // Send first so we have the actual Discord message ID to key on
     const sent = await channel.send(command);
@@ -467,6 +597,26 @@ const ADV_DECISIONS = {
 };
 
 // Cooldown rules per adventure type (returns seconds to wait)
+function parseAdvCooldownFromEmbed(msg) {
+    const embed = msg.embeds[0];
+    if (!embed) return null;
+    const text = [embed.description, embed.footer?.text, msg.content]
+        .filter(Boolean).join(' ');
+    if (!/start another adventure/i.test(text) && !/adventure.*cooldown/i.test(text)) return null;
+    // Prefer Discord relative timestamp <t:UNIX:R>
+    const tsMatch = text.match(/<t:(\d+):[RrtTdDfF]>/);
+    if (tsMatch) {
+        const secs = Math.round(parseInt(tsMatch[1]) - Date.now() / 1000);
+        if (secs > 0) return secs;
+    }
+    // Fall back to "in N hours / N minutes / N seconds" text
+    const m = text.match(/in\s+(?:(\d+)\s*hours?\s*)?(?:(\d+)\s*min(?:utes?)?\s*)?(?:(\d+)\s*sec(?:onds?)?)?/i);
+    if (m && (m[1] || m[2] || m[3])) {
+        return (parseInt(m[1] || 0) * 3600) + (parseInt(m[2] || 0) * 60) + (parseInt(m[3] || 0));
+    }
+    return null;
+}
+
 function calcAdvCooldown(advType, interactions) {
     const n = interactions || 10;
     const lc = advType.toLowerCase();
@@ -513,7 +663,7 @@ async function resolveChannel(client, channelId) {
     }
 
     const guilds = [...client.guilds.cache.values()];
-    log('info', `Searching ${guilds.length} guild(s) for channel ${channelId}...`);
+    log('info', `Searching ${guilds.length} guild(s) for channel/thread ${channelId}...`);
     for (const guild of guilds) {
         log('info', `Checking guild "${guild.name}" (${guild.id})...`);
         try {
@@ -523,12 +673,21 @@ async function resolveChannel(client, channelId) {
         } catch (e) {
             log('warn', `guild.channels.fetch() failed for "${guild.name}": ${e.message}`);
         }
+        // Also search active threads (not returned by guild.channels.fetch)
+        try {
+            const { threads } = await guild.channels.fetchActiveThreads();
+            const th = threads.get(channelId);
+            if (th) { log('info', `Found thread "${th.name}" in guild "${guild.name}"`); return th; }
+        } catch (e) {
+            log('warn', `fetchActiveThreads() failed for "${guild.name}": ${e.message}`);
+        }
     }
 
+    // Direct REST fetch — works for both channels and threads
     try {
         return await client.channels.fetch(channelId, { force: true });
     } catch (e) {
-        throw new Error(`Channel ${channelId} not found in any of ${guilds.length} guild(s). Original error: ${e.message}`);
+        throw new Error(`Channel/thread ${channelId} not found in any of ${guilds.length} guild(s). Original error: ${e.message}`);
     }
 }
 
@@ -543,6 +702,12 @@ client.on('ready', async () => {
         client.destroy(); return;
     }
     log('info', `Sending commands in #${channel.name ?? CHANNEL_ID}`);
+
+    // ── Referer: point to exact channel URL now that guild is known ──
+    const guildId = channel.guildId ?? channel.guild?.id ?? '@me';
+    const exactReferer = `https://discord.com/channels/${guildId}/${CHANNEL_ID}`;
+    client.options.http.headers['Referer'] = exactReferer;
+    log('info', `[HEADERS] Referer updated → ${exactReferer}`);
 
     // ── Save own Discord UID for mothership system ──────────
     postToApi(`/api/accounts/${ACCOUNT_ID}/discord_uid`, { discord_uid: String(client.user.id) });
@@ -577,6 +742,122 @@ client.on('ready', async () => {
             }
         }
         return null;
+    }
+
+    // ── Fishing helpers ─────────────────────────────────────
+    function findButtonDeep(components, labelSubstr) {
+        const lower = labelSubstr.toLowerCase();
+        for (const c of (components || [])) {
+            if (c.type === 'BUTTON' && (c.label || '').toLowerCase().includes(lower)) return c;
+            if (Array.isArray(c.components)) {
+                const found = findButtonDeep(c.components, labelSubstr);
+                if (found) return found;
+            }
+            if (c.accessory) {
+                const found = findButtonDeep([c.accessory], labelSubstr);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+
+    function findAllButtonsDeep(components, labelSubstr) {
+        const lower = labelSubstr.toLowerCase();
+        const results = [];
+        for (const c of (components || [])) {
+            if (c.type === 'BUTTON' && (c.label || '').toLowerCase().includes(lower)) results.push(c);
+            if (Array.isArray(c.components)) results.push(...findAllButtonsDeep(c.components, labelSubstr));
+            if (c.accessory) results.push(...findAllButtonsDeep([c.accessory], labelSubstr));
+        }
+        return results;
+    }
+
+    function extractTextDeep(components) {
+        let text = '';
+        for (const c of (components || [])) {
+            // Components V2 text fields — discord.js may map these differently
+            for (const key of ['content', 'description', 'label', 'text', 'value', 'title', 'placeholder']) {
+                if (typeof c[key] === 'string') text += ' ' + c[key];
+            }
+            if (Array.isArray(c.components)) text += extractTextDeep(c.components);
+            if (c.accessory) text += extractTextDeep([c.accessory]);
+            if (c.fields) for (const f of c.fields) text += ' ' + (f.name || '') + ' ' + (f.value || '');
+        }
+        return text;
+    }
+
+    function isBucketFull(components) {
+        const text = extractTextDeep(components);
+        if (/no more bucket space/i.test(text)) return true;
+        // ` 10 / 10 ` <emojis> Bucket Space — numbers may be separated from label by emoji codes
+        const m = text.match(/(\d+)\s*\/\s*(\d+)[^]*?Bucket\s*Space/i);
+        if (m && parseInt(m[1]) >= parseInt(m[2])) return true;
+        return false;
+    }
+
+    function waitForEdit(messageId, timeout = 45000) {
+        return new Promise((resolve, reject) => {
+            let done = false;
+            const t = setTimeout(() => {
+                if (done) return;
+                done = true;
+                client.off('messageUpdate', muHandler);
+                client.off('raw', rawHandler);
+                reject(new Error('Edit timeout'));
+            }, timeout);
+
+            function finish(msg) {
+                if (done) return;
+                done = true;
+                clearTimeout(t);
+                client.off('messageUpdate', muHandler);
+                client.off('raw', rawHandler);
+                resolve(msg);
+            }
+
+            function muHandler(oldMsg, newMsg) {
+                if (String(newMsg.id) !== String(messageId)) return;
+                finish(newMsg);
+            }
+
+            async function rawHandler(packet) {
+                if (packet.t !== 'MESSAGE_UPDATE') return;
+                if (String(packet.d.id) !== String(messageId)) return;
+                if (!packet.d.components && !packet.d.attachments) return;
+                try {
+                    const msg = await channel.messages.fetch(messageId, { force: true });
+                    // Preserve raw attachment data in case discord.js doesn't map it
+                    if (packet.d.attachments?.length) {
+                        msg._rawAttachments = packet.d.attachments;
+                    }
+                    finish(msg);
+                } catch {}
+            }
+
+            client.on('messageUpdate', muHandler);
+            client.on('raw', rawHandler);
+        });
+    }
+
+    function waitForReply(messageId, timeout = 20000) {
+        return new Promise((resolve, reject) => {
+            let done = false;
+            const t = setTimeout(() => {
+                if (done) return;
+                done = true;
+                _pendingReplies.delete(messageId);
+                reject(new Error('Reply timeout'));
+            }, timeout);
+            _pendingReplies.set(messageId, {
+                resolve: (msg) => {
+                    if (done) return;
+                    done = true;
+                    clearTimeout(t);
+                    resolve(msg);
+                },
+                command: 'waitForReply'
+            });
+        });
     }
 
     async function confirmIfNeeded(msg, label) {
@@ -634,7 +915,7 @@ client.on('ready', async () => {
             const { type, mothership_uid, mothership_name } = trigger;
 
             if (type === 'items') {
-                await _interactionLock.runExclusive(async () => {
+                await runWithLock(async () => {
                     let iterations = 0;
                     while (iterations < 15) {
                         iterations++;
@@ -658,7 +939,7 @@ client.on('ready', async () => {
                     }
                 });
             } else if (type === 'coins') {
-                await _interactionLock.runExclusive(async () => {
+                await runWithLock(async () => {
                     writeTransferStatus('Checking wallet balance...');
                     const balMsg = await sendAndWait(channel, 'pls bal', 15);
                     if (!balMsg) { writeTransferStatus('No balance response', true); return; }
@@ -706,22 +987,47 @@ client.on('ready', async () => {
         return rows;
     }
 
+    // ── Uptime / Downtime cycle ──────────────────────────────
+    async function cycleLoop() {
+        while (true) {
+            await sleep(5000);
+            const up   = _cfg.cycle_uptime_mins;
+            const down = _cfg.cycle_downtime_mins;
+            if (!_cfg.limit_flags || !up || !down) { _botPaused = false; continue; }
+
+            _botPaused = false;
+            log('info', `[CYCLE] Uptime started — active for ${up}min`);
+            await sleep(up * 60000);
+
+            // re-check in case config changed mid-sleep
+            if (!_cfg.limit_flags || !_cfg.cycle_uptime_mins || !_cfg.cycle_downtime_mins) continue;
+
+            _botPaused = true;
+            log('info', `[CYCLE] Downtime started — resting for ${down}min`);
+            await sleep(down * 60000);
+        }
+    }
+
     async function begLoop() {
         while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
             if (_cfg.commands_enabled.beg) {
-                await _interactionLock.runExclusive(async () => {
+                await runWithLock(async () => {
                     await sendAndWait(channel, 'pls beg');
                 });
             }
-            await sleep(_cfg.beg_cooldown * 1000);
+            const _begSleep = _cfg.limit_flags ? humanJitter(_cfg.beg_cooldown * 1000) : _cfg.beg_cooldown * 1000;
+            await sleep(_begSleep);
+            await stealthExtraSleep();
         }
     }
 
     async function searchLoop() {
         await sleep(3000);
         while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
             if (_cfg.commands_enabled.search) {
-                await _interactionLock.runExclusive(async () => {
+                await runWithLock(async () => {
                     const res = await sendAndWait(channel, 'pls search');
                     if (res) {
                         const btns   = getButtons(res);
@@ -734,15 +1040,18 @@ client.on('ready', async () => {
                     }
                 });
             }
-            await sleep(_cfg.search_cooldown * 1000);
+            const _searchSleep = _cfg.limit_flags ? humanJitter(_cfg.search_cooldown * 1000) : _cfg.search_cooldown * 1000;
+            await sleep(_searchSleep);
+            await stealthExtraSleep();
         }
     }
 
     async function crimeLoop() {
         await sleep(12000);
         while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
             if (_cfg.commands_enabled.crime) {
-                await _interactionLock.runExclusive(async () => {
+                await runWithLock(async () => {
                     const res = await sendAndWait(channel, 'pls crime');
                     if (res) {
                         const btns   = getButtons(res);
@@ -755,15 +1064,18 @@ client.on('ready', async () => {
                     }
                 });
             }
-            await sleep(_cfg.crime_cooldown * 1000);
+            const _crimeSleep = _cfg.limit_flags ? humanJitter(_cfg.crime_cooldown * 1000) : _cfg.crime_cooldown * 1000;
+            await sleep(_crimeSleep);
+            await stealthExtraSleep();
         }
     }
 
     async function digLoop() {
         await sleep(6000);
         while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
             if (_cfg.commands_enabled.dig) {
-                await _interactionLock.runExclusive(async () => {
+                await runWithLock(async () => {
                     const res = await sendAndWait(channel, 'pls dig');
                     if (res) {
                         const desc = res.embeds[0]?.description || '';
@@ -772,15 +1084,18 @@ client.on('ready', async () => {
                     }
                 });
             }
-            await sleep(_cfg.cooldown * 1000);
+            const _digSleep = _cfg.limit_flags ? humanJitter(_cfg.cooldown * 1000) : _cfg.cooldown * 1000;
+            await sleep(_digSleep);
+            await stealthExtraSleep();
         }
     }
 
     async function huntLoop() {
         await sleep(9000);
         while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
             if (_cfg.commands_enabled.hunt) {
-                await _interactionLock.runExclusive(async () => {
+                await runWithLock(async () => {
                     const res = await sendAndWait(channel, 'pls hunt');
                     if (res) {
                         const desc = res.embeds[0]?.description || '';
@@ -788,15 +1103,18 @@ client.on('ready', async () => {
                     }
                 });
             }
-            await sleep(_cfg.cooldown * 1000);
+            const _huntSleep = _cfg.limit_flags ? humanJitter(_cfg.cooldown * 1000) : _cfg.cooldown * 1000;
+            await sleep(_huntSleep);
+            await stealthExtraSleep();
         }
     }
 
     async function hlLoop() {
         await sleep(15000);
         while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
             if (_cfg.commands_enabled.hl) {
-                await _interactionLock.runExclusive(async () => {
+                await runWithLock(async () => {
                     const res = await sendAndWait(channel, 'pls hl', _cfg.hl_wait_for);
                     if (res) {
                         const desc  = res.embeds[0]?.description || '';
@@ -813,7 +1131,9 @@ client.on('ready', async () => {
                     }
                 });
             }
-            await sleep(_cfg.hl_cooldown * 1000);
+            const _hlSleep = _cfg.limit_flags ? humanJitter(_cfg.hl_cooldown * 1000) : _cfg.hl_cooldown * 1000;
+            await sleep(_hlSleep);
+            await stealthExtraSleep();
         }
     }
 
@@ -821,10 +1141,11 @@ client.on('ready', async () => {
         await sleep(18000);
         const PM_PLATFORMS = ['TikTok', 'Discord', 'Reddit', 'Twitter', 'Facebook'];
         while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
             let pmCooldown = _cfg.pm_cooldown;
             if (_cfg.commands_enabled.pm) {
                 const platform = PM_PLATFORMS[Math.floor(Math.random() * PM_PLATFORMS.length)];
-                await _interactionLock.runExclusive(async () => {
+                await runWithLock(async () => {
                     const res = await sendAndWait(channel, 'pls pm');
                     if (res) {
                         const menuRows = getMenuRows(res);
@@ -868,19 +1189,28 @@ client.on('ready', async () => {
     async function advLoop() {
         await sleep(21000);
         while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
             if (!_cfg.commands_enabled.adv) {
                 await sleep(10000);
                 continue;
             }
             let advCooldown = _cfg.adv_cooldown;
             if (_cfg.commands_enabled.adv) {
-                await _interactionLock.runExclusive(async () => {
+                await runWithLock(async () => {
                     const advType = _cfg.adv_type;
                     log('info', `[ADV] Starting adventure: "${advType}"`);
 
                     // Step 1: send pls adv and wait for bot reply
                     const res = await sendAndWait(channel, 'pls adv', 15);
                     if (!res) { log('warn', '[ADV] No response to pls adv'); return; }
+
+                    // Step 1b: detect cooldown message — "You can start another adventure in N minutes"
+                    const cooldownSecs = parseAdvCooldownFromEmbed(res);
+                    if (cooldownSecs !== null) {
+                        advCooldown = cooldownSecs + 10;
+                        log('info', `[ADV] Adventure on cooldown — waiting ${Math.round(advCooldown / 60)}min ${advCooldown % 60}s`);
+                        return;
+                    }
 
                     // Step 2: always use select menu if present (ensures correct adventure type is set)
                     let msg = res;
@@ -939,7 +1269,7 @@ client.on('ready', async () => {
 
                     while (maxIter-- > 0) {
                         await sleep(nextWait);
-                        nextWait = 300; // default — reset each iteration
+                        nextWait = 150; // default — reset each iteration
 
                         try {
                             msg = await channel.messages.fetch(res.id);
@@ -949,13 +1279,14 @@ client.on('ready', async () => {
                         }
 
                         try {
-                            const embed    = msg.embeds[0];
-                            const buttons  = getButtons(msg);
+                            const embed      = msg.embeds[0];
+                            const allButtons = getButtons(msg);
+                            // Never attempt to click a disabled button — filter first
+                            const buttons    = allButtons.filter(b => !b.disabled);
 
                             if (!embed) {
                                 consecutiveFails++;
                                 if (consecutiveFails > 3) { log('warn', '[ADV] No embed 3× in a row — aborting'); break; }
-                                nextWait = 250;
                                 continue;
                             }
                             consecutiveFails = 0;
@@ -964,13 +1295,11 @@ client.on('ready', async () => {
                             const embedDesc  = embed.description || '';
                             const embedDescL = embedDesc.toLowerCase();
 
-                            // Detect adventure end
-                            const endBtn  = buttons.find(b =>
+                            // Detect adventure end (check allButtons so disabled end-btn is still detected)
+                            const endBtn  = allButtons.find(b =>
                                 (b.label || '').toLowerCase().includes('adventure again')
                             );
-                            const hasSkip = buttons.some(isSkipButton);
-                            // Title/endBtn matches are definitive; description matches only
-                            // count if there's no skip button (otherwise it's a transition prompt)
+                            const hasSkip = allButtons.some(isSkipButton);
                             const isRealEnd =
                                 endBtn ||
                                 embedTitle.includes('adventure summary') ||
@@ -988,7 +1317,6 @@ client.on('ready', async () => {
                                 if (endBtn) {
                                     const lbl = endBtn.label || '';
                                     log('info', `[ADV] End button: "${lbl}"`);
-                                    // Parse text duration e.g. "Adventure again in 1 hour 30 minutes 20 seconds"
                                     const hMatch = lbl.match(/(\d+)\s*hour/i);
                                     const mMatch = lbl.match(/(\d+)\s*min/i);
                                     const sMatch = lbl.match(/(\d+)\s*sec/i);
@@ -1011,70 +1339,51 @@ client.on('ready', async () => {
                                 if (m) interactions = parseInt(m[1]);
                             }
 
+                            // All buttons disabled — mid-transition, re-fetch quickly
                             if (!buttons.length) {
-                                nextWait = 250;
                                 continue;
                             }
 
                             const skipBtn       = buttons.find(isSkipButton);
                             const choiceButtons = buttons.filter(b => !isSkipButton(b) && !isUtilityButton(b));
 
-                            // This embed is the result of a previous answer — click skip to advance
+                            // Already answered — wait for enabled skip to advance past result screen
                             if (embedDesc === lastClickedDesc) {
                                 if (skipBtn) {
                                     try {
                                         await msg.clickButton(skipBtn.customId);
                                         log('info', '[ADV] ✓ → advanced past result');
                                         lastClickedDesc = null;
-                                        nextWait = 150;
-                                    } catch (e) { nextWait = 200; }
-                                } else {
-                                    nextWait = 150; // skip not ready yet, check again soon
+                                    } catch (e) { log('warn', `[ADV] Advance skip failed: ${e.message}`); }
                                 }
+                                // skip not enabled yet — loop will re-fetch immediately
                                 continue;
                             }
 
-                            // Pick best answer
+                            // Pick and click best enabled button
                             const bestBtn = choiceButtons.length
                                 ? pickAdventureChoice(advType, embedDesc, choiceButtons)
                                 : skipBtn;
 
-                            if (bestBtn && !isSkipButton(bestBtn)) {
+                            if (!bestBtn) { continue; }
+
+                            if (!isSkipButton(bestBtn)) {
                                 log('info', `[ADV] Clicking '${btnName(bestBtn)}'`);
-                                let clickSucceeded = false;
                                 try {
                                     await msg.clickButton(bestBtn.customId);
                                     log('info', `[ADV] ✓ Clicked '${btnName(bestBtn)}'`);
                                     lastClickedDesc = embedDesc;
-                                    nextWait = 150;
-                                    clickSucceeded = true;
                                 } catch (e) {
-                                    log('warn', `[ADV] Click failed: ${e.message} — falling back to skip`);
+                                    log('warn', `[ADV] Click failed: ${e.message}`);
                                 }
-                                // Button was disabled — try skip immediately as fallback
-                                if (!clickSucceeded && skipBtn) {
-                                    try {
-                                        await msg.clickButton(skipBtn.customId);
-                                        log('info', `[ADV] ✓ Fallback skip clicked`);
-                                        lastClickedDesc = null;
-                                        nextWait = 150;
-                                    } catch (e) {
-                                        log('warn', `[ADV] Fallback skip failed: ${e.message}`);
-                                        nextWait = 250;
-                                    }
-                                } else if (!clickSucceeded) {
-                                    nextWait = 250;
-                                }
-                            } else if (skipBtn) {
-                                log('info', `[ADV] Clicking skip '${btnName(skipBtn)}'`);
+                            } else {
+                                log('info', `[ADV] Clicking skip '${btnName(bestBtn)}'`);
                                 try {
-                                    await msg.clickButton(skipBtn.customId);
+                                    await msg.clickButton(bestBtn.customId);
                                     log('info', '[ADV] ✓ Skipped');
                                     lastClickedDesc = null;
-                                    nextWait = 150;
                                 } catch (e) {
                                     log('warn', `[ADV] Skip failed: ${e.message}`);
-                                    nextWait = 250;
                                 }
                             }
                         } catch (iterErr) {
@@ -1094,6 +1403,251 @@ client.on('ready', async () => {
         }
     }
 
+    // ── Fishing loop ─────────────────────────────────────────
+    async function fishLoop() {
+        await sleep(7000);
+        while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
+            if (!_cfg.commands_enabled?.fish) { await sleep(5000); continue; }
+
+            await _interactionLock.runExclusive(async () => {
+                log('info', '[FISH] Fishing started');
+
+                // Step 1: send pls fish catch
+                const res = await sendAndWait(channel, 'pls fish catch', 15);
+                if (!res) { log('warn', '[FISH] No response to pls fish catch'); return; }
+
+                // Step 2: find "Go Fishing" button (Components V2 aware)
+                const goBtn = findButtonDeep(res.components, 'Go Fishing');
+                if (!goBtn) { log('warn', '[FISH] No "Go Fishing" button found'); return; }
+
+                // Step 3: register edit listener BEFORE clicking to avoid race
+                let editPromise = waitForEdit(res.id, 30000);
+                try {
+                    await res.clickButton(goBtn.customId);
+                    log('info', '[FISH] Go Fishing clicked');
+                } catch (e) {
+                    log('warn', `[FISH] Go Fishing click failed: ${e.message}`);
+                    return;
+                }
+
+                // Step 4: await the edited fishing grid message
+                let fishMsg;
+                try {
+                    fishMsg = await editPromise;
+                } catch {
+                    log('warn', '[FISH] Timed out waiting for fishing grid');
+                    return;
+                }
+
+                // Step 5: inner loop — Catch fish, use Fish Again, sell bucket when full
+                while (_cfg.commands_enabled?.fish) {
+
+                    // ── Bucket full? Sell before continuing ──────────────────
+                    // Detect fullness via "n / n Bucket Space" text or ⚠️ warning emoji
+                    const openBucketsBtn = findButtonDeep(fishMsg.components, 'Open Buckets');
+                    if (openBucketsBtn && isBucketFull(fishMsg.components)) {
+                        log('info', `[FISH] Bucket full — text: ${extractTextDeep(fishMsg.components).replace(/\s+/g, ' ').slice(0, 200)}`);
+                        log('info', '[FISH] Bucket at capacity — opening buckets to sell');
+                        const bucketsReplyPromise = waitForReply(fishMsg.id, 8000);
+                        try {
+                            await fishMsg.clickButton(openBucketsBtn.customId);
+                        } catch (e) {
+                            log('warn', `[FISH] Open Buckets click failed: ${e.message}`);
+                            break;
+                        }
+                        let bucketsMsg;
+                        try {
+                            bucketsMsg = await bucketsReplyPromise;
+                        } catch {
+                            log('warn', '[FISH] Timed out waiting for buckets view');
+                            break;
+                        }
+
+                        const sellAllBtn = findButtonDeep(bucketsMsg.components, 'Sell All Fish');
+                        if (!sellAllBtn) { log('warn', '[FISH] No "Sell All Fish" button'); break; }
+
+                        // Sell All Fish may edit bucketsMsg OR send a new reply — race both
+                        const sellEditPromise = waitForEdit(bucketsMsg.id, 8000);
+                        const sellReplyPromise = waitForReply(bucketsMsg.id, 8000);
+                        try {
+                            await bucketsMsg.clickButton(sellAllBtn.customId);
+                        } catch (e) {
+                            log('warn', `[FISH] Sell All Fish click failed: ${e.message}`);
+                            break;
+                        }
+                        let sellMsg;
+                        try {
+                            sellMsg = await Promise.race([sellEditPromise, sellReplyPromise]);
+                        } catch {
+                            log('warn', `[FISH] Timed out waiting for sell options — bucketsMsg components: ${JSON.stringify(bucketsMsg.components || []).slice(0, 400)}`);
+                            break;
+                        }
+
+                        log('info', `[FISH] Sell options received — components: ${JSON.stringify(sellMsg.components || []).slice(0, 400)}`);
+
+                        // Pick Coins or Tokens based on config
+                        const currency   = _cfg.fish_sell_currency === 'tokens' ? 'tokens' : 'coins';
+                        log('info', `[FISH] fish_sell_currency cfg="${_cfg.fish_sell_currency}" → selling for ${currency}`);
+
+                        // Match button by customId suffix (:coins / :tokens) — more reliable than label text
+                        function findSellBtn(components, want) {
+                            for (const c of (components || [])) {
+                                if (c.type === 'BUTTON' && c.customId && c.customId.endsWith(':' + want)) return c;
+                                if (Array.isArray(c.components)) { const f = findSellBtn(c.components, want); if (f) return f; }
+                            }
+                            return null;
+                        }
+                        const sellBtn = findSellBtn(sellMsg.components, currency);
+                        if (!sellBtn) {
+                            log('warn', `[FISH] No sell button found for currency "${currency}" — available: ${JSON.stringify(sellMsg.components || []).slice(0, 400)}`);
+                            break;
+                        }
+                        try {
+                            await sellMsg.clickButton(sellBtn.customId);
+                            log('info', `[FISH] Sold fish for ${currency}`);
+                            log('info', '[FISH:SELL]');
+                        } catch (e) {
+                            log('warn', `[FISH] Sell click failed: ${e.message}`);
+                        }
+                        // Bucket emptied — restart from pls fish catch
+                        break;
+                    }
+
+                    // ── No Catch buttons yet — wait 15s then Fish Again ──────
+                    const catchBtns = findAllButtonsDeep(fishMsg.components, 'Catch');
+
+                    if (catchBtns.length === 0) {
+                        log('info', '[FISH] No fish visible — waiting 15s');
+                        await sleep(15000);
+                        if (!_cfg.commands_enabled?.fish) break;
+
+                        const fishAgainBtn = findButtonDeep(fishMsg.components, 'Fish Again');
+                        if (!fishAgainBtn) { log('warn', '[FISH] No "Fish Again" button'); break; }
+
+                        editPromise = waitForEdit(fishMsg.id, 30000);
+                        try {
+                            await fishMsg.clickButton(fishAgainBtn.customId);
+                        } catch (e) {
+                            log('warn', `[FISH] Fish Again click failed: ${e.message}`);
+                            break;
+                        }
+                        try {
+                            fishMsg = await editPromise;
+                        } catch {
+                            log('warn', '[FISH] Timed out waiting for fishing grid update');
+                            break;
+                        }
+                        continue;
+                    }
+
+                    // Catch buttons found — get image and detect fish
+                    // Try multiple sources: standard attachments, embeds, Components V2 media
+                    function extractImageUrl(msg) {
+                        // 1. Standard message attachment
+                        const att = msg.attachments?.first?.();
+                        if (att?.url)      return att.url;
+                        if (att?.proxyURL) return att.proxyURL;
+
+                        // 2. Embed image or thumbnail
+                        for (const embed of (msg.embeds || [])) {
+                            if (embed.image?.url)     return embed.image.url;
+                            if (embed.thumbnail?.url) return embed.thumbnail.url;
+                        }
+
+                        // 3. Components V2 — recurse component tree
+                        // Convert to plain JSON first — discord.js wrapper objects hide properties like .items/.media
+                        function searchComponents(comps) {
+                            for (const c of (comps || [])) {
+                                // items[].media.url — used by type 11 (Media Gallery) AND type 12 in Dank Memer
+                                if (Array.isArray(c.items)) {
+                                    for (const item of c.items) {
+                                        const u = item.media?.url || item.media?.proxy_url;
+                                        if (u) return u;
+                                    }
+                                }
+                                // Standard file property (type 12 File component)
+                                if (c.file?.url || c.file?.proxy_url) {
+                                    return c.file.url || c.file.proxy_url;
+                                }
+                                // Accessory (type 9 Section)
+                                if (c.accessory) {
+                                    const u = c.accessory?.media?.url || c.accessory?.url || c.accessory?.proxy_url;
+                                    if (u) return u;
+                                }
+                                // Recurse nested components
+                                if (Array.isArray(c.components)) {
+                                    const found = searchComponents(c.components);
+                                    if (found) return found;
+                                }
+                            }
+                            return null;
+                        }
+                        // Serialize to plain JSON so all properties are directly accessible
+                        let plainComps;
+                        try { plainComps = JSON.parse(JSON.stringify(msg.components || [])); } catch { plainComps = []; }
+                        const fromComps = searchComponents(plainComps);
+                        if (fromComps) return fromComps;
+
+                        // 4. Raw _rawAttachments set by waitForEdit rawHandler
+                        const rawAtts = msg._rawAttachments;
+                        if (rawAtts?.length) {
+                            return rawAtts[0].url || rawAtts[0].proxy_url;
+                        }
+
+                        return null;
+                    }
+
+                    let imgUrl = extractImageUrl(fishMsg);
+
+                    // If still nothing, log full component structure for debugging
+                    if (!imgUrl) {
+                        log('warn', `[FISH] No image found — attachments:${fishMsg.attachments?.size ?? 0} embeds:${fishMsg.embeds?.length ?? 0} components:${JSON.stringify(fishMsg.components || []).slice(0, 300)}`);
+                        break;
+                    }
+
+                    let fishCell;
+                    try {
+                        fishCell = await detectFish(imgUrl);
+                    } catch (e) {
+                        log('warn', `[FISH] Image detection failed: ${e.message}`);
+                        break;
+                    }
+
+                    log('info', `[FISH] Fish detected at Row ${fishCell.row + 1} Col ${fishCell.col + 1}`);
+
+                    const targetBtn = catchBtns[fishCell.index];
+                    if (!targetBtn) {
+                        log('warn', `[FISH] No Catch button at grid index ${fishCell.index} (only ${catchBtns.length} buttons)`);
+                        break;
+                    }
+
+                    editPromise = waitForEdit(fishMsg.id, 20000);
+                    try {
+                        await fishMsg.clickButton(targetBtn.customId);
+                    } catch (e) {
+                        log('warn', `[FISH] Catch click failed: ${e.message}`);
+                        break;
+                    }
+                    try {
+                        fishMsg = await editPromise;
+                        log('info', '[FISH] Fish caught — waiting 15s before next cast');
+                        // Log fish name for dashboard stats
+                        const _catchText = extractTextDeep(fishMsg.components);
+                        const _nameMatch = _catchText.match(/You caught (?:a |an )?(.+?)\./i);
+                        if (_nameMatch) log('info', `[FISH:CATCH] ${_nameMatch[1].trim()}`);
+                    } catch {
+                        log('warn', '[FISH] No edit after catch — restarting');
+                        break;
+                    }
+                    // Continue inner loop: "no Catch buttons" branch will wait 15s then click Fish Again
+                }
+            });
+
+            await sleep(5000);
+        }
+    }
+
     async function heartbeatLoop() {
         while (true) {
             await sleep(30000);
@@ -1101,11 +1655,331 @@ client.on('ready', async () => {
         }
     }
 
+    // ── Market View Components V2 Parser ───────────────────────
+    // Studied from live `pls market view apple` response (see study probe below).
+    // Structure:
+    //   message.components[0] = top-level Container
+    //   .components[N]        = listing Section (has .components[] + .accessory button)
+    //   .components[N].components[0].content = listing text (TextDisplay, type 10)
+    //   .components[N].accessory              = Accept button (type 2, customId "market-accept:<uid>:<id>")
+    // Text format:
+    //   "**Selling 2,252 <:Apple:...> Apple**\n... For: ⏣ 99,088,000\n... Value per Unit: ⏣ 44,000\n..."
+    // "Buy from Shop" entries have customId containing ":DM:" — skip them.
+    // Non-coin listings have no "⏣" in "Value per Unit:" line — skip them.
+    function parseMarketListings(components) {
+        const listings = [];
+        let plain;
+        try { plain = JSON.parse(JSON.stringify(components || [])); } catch { return listings; }
+
+        const container = plain[0];
+        if (!container) return listings;
+
+        for (const child of (container.components || [])) {
+            if (!child.components || !child.accessory) continue;
+
+            const textNode = child.components.find(c => typeof c.content === 'string');
+            if (!textNode) continue;
+            const text = textNode.content;
+
+            const btn = child.accessory;
+            if (!btn || (btn.type !== 2 && btn.type !== 'BUTTON')) continue;
+            if (btn.disabled) continue;
+
+            const cid = btn.customId || btn.custom_id || '';
+            if (cid.includes(':DM:'))          continue; // "Buy from Shop" — DM official price
+            if (!cid.startsWith('market-accept:')) continue;
+
+            // Only coin-denominated listings
+            const unitMatch = text.match(/Value per Unit:\s*⏣\s*([\d,]+)/);
+            if (!unitMatch) continue;
+            const pricePerUnit = parseInt(unitMatch[1].replace(/,/g, ''), 10);
+
+            const qtyMatch    = text.match(/\*\*Selling\s+([\d,]+)/);
+            const qty         = qtyMatch ? parseInt(qtyMatch[1].replace(/,/g, ''), 10) : 1;
+
+            const totalMatch  = text.match(/For:\s*⏣\s*([\d,]+)/);
+            const totalPrice  = totalMatch ? parseInt(totalMatch[1].replace(/,/g, ''), 10) : pricePerUnit * qty;
+
+            const listingId      = cid.split(':').slice(2).join(':');
+            const partialAllowed = text.includes('Partial Accepting Allowed');
+
+            listings.push({ pricePerUnit, qty, totalPrice, listingId, partialAllowed, button: btn, text: text.slice(0, 300) });
+        }
+        return listings;
+    }
+
+    // ── Market Sniper loop ──────────────────────────────────────
+    async function marketSniperLoop() {
+        await sleep(35000); // stagger after other loops
+        while (true) {
+            if (!_cfg.market_sniper_enabled || !Array.isArray(_cfg.market_sniper_items) || !_cfg.market_sniper_items.length) {
+                await sleep(5000);
+                continue;
+            }
+
+            for (const sniperItem of [..._cfg.market_sniper_items]) {
+                if (!_cfg.market_sniper_enabled) break;
+                const { name, max_price, buy_qty = 1 } = sniperItem;
+                if (!name || !(max_price > 0)) continue;
+
+                const maxBuys = Math.max(1, Math.min(50, Math.floor(Number(buy_qty)) || 1));
+
+                for (let buyN = 0; buyN < maxBuys; buyN++) {
+                if (!_cfg.market_sniper_enabled) break;
+                if (buyN > 0) log('info', `[SNIPER] Buy ${buyN + 1}/${maxBuys} for "${name}"`);
+
+                await runWithLock(async () => {
+                    log('info', `[SNIPER] Checking market: "${name}" (max ⏣${max_price.toLocaleString()})`);
+                    const res = await sendAndWait(channel, `pls market view ${name}`, 15);
+                    if (!res) { log('warn', `[SNIPER] No response for: ${name}`); return; }
+
+                    const listings = parseMarketListings(res.components);
+                    log('info', `[SNIPER] Found ${listings.length} coin listing(s) for "${name}"`);
+
+                    if (!listings.length) return;
+
+                    // Sort ascending by price, keep only those at or below max_price
+                    const eligible = listings
+                        .filter(l => l.pricePerUnit <= max_price)
+                        .sort((a, b) => a.pricePerUnit - b.pricePerUnit);
+
+                    if (!eligible.length) {
+                        const cheapest = [...listings].sort((a, b) => a.pricePerUnit - b.pricePerUnit)[0];
+                        log('info', `[SNIPER] Cheapest ⏣${cheapest.pricePerUnit.toLocaleString()}/unit > max ⏣${max_price.toLocaleString()} for "${name}" — skipping`);
+                        return;
+                    }
+
+                    const target = eligible[0];
+                    log('info', `[SNIPER] TARGET: "${name}" @ ⏣${target.pricePerUnit.toLocaleString()}/unit × ${target.qty} (listing ${target.listingId})`);
+
+                    const btnCid = target.button.customId || target.button.custom_id;
+                    if (!btnCid) { log('warn', '[SNIPER] No customId on Accept button'); return; }
+
+                    // Register reply listener BEFORE clicking to avoid race condition
+                    let replyPromise;
+                    try { replyPromise = waitForReply(res.id, 12000); } catch (e) { replyPromise = null; }
+
+                    try {
+                        await res.clickButton(btnCid);
+                        log('info', `[SNIPER] ✓ Clicked Accept (listing ${target.listingId})`);
+                    } catch (e) {
+                        log('warn', `[SNIPER] Accept click failed: ${e.message}`);
+                        return;
+                    }
+
+                    // Wait for confirmation dialog (new reply or edit)
+                    let confirmMsg = null;
+                    if (replyPromise) {
+                        try { confirmMsg = await replyPromise; }
+                        catch { confirmMsg = null; }
+                    }
+                    if (!confirmMsg) {
+                        // Fallback: fetch edit on original message
+                        await sleep(1000);
+                        try { confirmMsg = await channel.messages.fetch(res.id, { force: true }); } catch {}
+                    }
+
+                    if (!confirmMsg) {
+                        log('warn', '[SNIPER] No confirmation message received after Accept');
+                        return;
+                    }
+
+                    // Look for Confirm / Yes button in the follow-up
+                    let cfmPlain;
+                    try { cfmPlain = JSON.parse(JSON.stringify(confirmMsg.components || [])); } catch { cfmPlain = []; }
+
+                    // Search for confirm button (label "Confirm" or "Yes") in plain component tree
+                    function findCfmBtn(comps) {
+                        for (const c of (comps || [])) {
+                            if ((c.type === 2 || c.type === 'BUTTON') && !c.disabled) {
+                                const lbl = (c.label || '').toLowerCase();
+                                if (lbl === 'confirm' || lbl === 'yes' || lbl === 'accept' || lbl === 'buy') return c;
+                            }
+                            if (Array.isArray(c.components)) { const f = findCfmBtn(c.components); if (f) return f; }
+                            if (c.accessory) { const f = findCfmBtn([c.accessory]); if (f) return f; }
+                        }
+                        return null;
+                    }
+                    const cfmBtn = findCfmBtn(cfmPlain);
+
+                    if (cfmBtn) {
+                        const cfmCid = cfmBtn.customId || cfmBtn.custom_id;
+                        try {
+                            await confirmMsg.clickButton(cfmCid);
+                            log('info', `[SNIPER] ✓ Purchase confirmed: "${name}" @ ⏣${target.pricePerUnit.toLocaleString()}/unit × ${target.qty}`);
+                            log('info', `[SNIPER:BUY] ${name} ${target.pricePerUnit} ${target.qty}`);
+                            postToApi(`/api/accounts/${ACCOUNT_ID}/sniper-event`, { item: name, price: target.pricePerUnit, qty: target.qty });
+                        } catch (e) {
+                            log('warn', `[SNIPER] Confirm click failed: ${e.message}`);
+                        }
+                    } else {
+                        // No confirm button — check if purchase already went through automatically
+                        const cfmText = extractTextDeep(cfmPlain);
+                        if (/purchased|bought|success|accepted/i.test(cfmText)) {
+                            log('info', `[SNIPER] ✓ Purchase auto-confirmed: "${name}" @ ⏣${target.pricePerUnit.toLocaleString()}`);
+                            log('info', `[SNIPER:BUY] ${name} ${target.pricePerUnit} ${target.qty}`);
+                            postToApi(`/api/accounts/${ACCOUNT_ID}/sniper-event`, { item: name, price: target.pricePerUnit, qty: target.qty });
+                        } else {
+                            log('warn', `[SNIPER] No confirm button found — dialog text: ${cfmText.slice(0, 200)}`);
+                        }
+                    }
+                });
+
+                if (buyN < maxBuys - 1) await sleep(2000); // inter-buy pause
+                } // close buy-qty loop
+
+                await sleep(2500); // inter-item pause
+            }
+
+            await sleep(_cfg.market_sniper_cooldown * 1000);
+        }
+    }
+
+    // ── Market Study Probe ──────────────────────────────────────
+    // Sends `pls market view <item>` once, dumps the FULL raw component
+    // tree and all interactive elements so we can study the structure.
+    async function studyMarketView() {
+        const item = _cfg.market_study_item;
+        if (!item) return;
+
+        log('info', `[STUDY] === Starting market view study for: "${item}" ===`);
+        await sleep(12000); // Wait for bot to be fully ready
+
+        await runWithLock(async () => {
+            const res = await sendAndWait(channel, `pls market view ${item}`, 20);
+            if (!res) { log('warn', '[STUDY] No response received'); return; }
+
+            // ── 1. Raw content & embeds ─────────────────────────────
+            log('info', `[STUDY] content: ${JSON.stringify(res.content || '')}`);
+            for (let i = 0; i < (res.embeds || []).length; i++) {
+                const e = res.embeds[i];
+                log('info', `[STUDY] embed[${i}]: title=${JSON.stringify(e.title)} desc=${JSON.stringify((e.description || '').slice(0, 300))}`);
+                for (const f of (e.fields || [])) {
+                    log('info', `[STUDY] embed[${i}].field: name=${JSON.stringify(f.name)} value=${JSON.stringify(f.value)}`);
+                }
+            }
+
+            // ── 2. Full raw components JSON (chunked to avoid log truncation) ──
+            let plainComps;
+            try { plainComps = JSON.parse(JSON.stringify(res.components || [])); } catch { plainComps = []; }
+            const raw = JSON.stringify(plainComps, null, 2);
+            const chunkSize = 400;
+            const chunks = Math.ceil(raw.length / chunkSize);
+            log('info', `[STUDY] components JSON — ${raw.length} chars, ${chunks} chunks:`);
+            for (let i = 0; i < chunks; i++) {
+                log('info', `[STUDY] RAW[${i}/${chunks}] ${raw.slice(i * chunkSize, (i + 1) * chunkSize)}`);
+            }
+
+            // ── 3. Walk ALL buttons (deep) ──────────────────────────
+            function collectButtons(comps, path = '') {
+                const found = [];
+                for (let i = 0; i < (comps || []).length; i++) {
+                    const c = comps[i];
+                    const p = `${path}[${i}]`;
+                    const t = c.type || c.component_type;
+                    if (t === 'BUTTON' || t === 2) {
+                        found.push({ path: p, label: c.label, customId: c.customId || c.custom_id, style: c.style, disabled: c.disabled, emoji: c.emoji?.name });
+                    }
+                    if (Array.isArray(c.components)) found.push(...collectButtons(c.components, p + '.components'));
+                    if (c.accessory) found.push(...collectButtons([c.accessory], p + '.accessory'));
+                }
+                return found;
+            }
+            const buttons = collectButtons(plainComps);
+            log('info', `[STUDY] Total buttons found: ${buttons.length}`);
+            for (const b of buttons) {
+                log('info', `[STUDY] BTN path=${b.path} label=${JSON.stringify(b.label)} customId=${JSON.stringify(b.customId)} style=${b.style} disabled=${b.disabled} emoji=${b.emoji}`);
+            }
+
+            // ── 4. Walk ALL text content (deep) ────────────────────
+            function collectText(comps, path = '') {
+                const texts = [];
+                for (let i = 0; i < (comps || []).length; i++) {
+                    const c = comps[i];
+                    const p = `${path}[${i}]`;
+                    const t = c.type || c.component_type;
+                    for (const key of ['content', 'description', 'label', 'text', 'value', 'title', 'placeholder']) {
+                        if (typeof c[key] === 'string' && c[key].length > 0) {
+                            texts.push({ path: p, type: t, key, value: c[key] });
+                        }
+                    }
+                    if (Array.isArray(c.items)) {
+                        for (let j = 0; j < c.items.length; j++) {
+                            const item = c.items[j];
+                            texts.push({ path: `${p}.items[${j}]`, type: 'item', key: 'media', value: JSON.stringify(item.media || {}) });
+                        }
+                    }
+                    if (Array.isArray(c.components)) texts.push(...collectText(c.components, p + '.components'));
+                    if (c.accessory) texts.push(...collectText([c.accessory], p + '.accessory'));
+                }
+                return texts;
+            }
+            const texts = collectText(plainComps);
+            log('info', `[STUDY] Total text nodes: ${texts.length}`);
+            for (const t of texts) {
+                log('info', `[STUDY] TXT path=${t.path} type=${t.type} key=${t.key} val=${JSON.stringify(t.value.slice(0, 200))}`);
+            }
+
+            // ── 5. Old-style component rows ─────────────────────────
+            const oldBtns = getButtons(res);
+            log('info', `[STUDY] Legacy getButtons() found: ${oldBtns.length}`);
+            for (const b of oldBtns) {
+                log('info', `[STUDY] LEGACY_BTN label=${JSON.stringify(b.label)} customId=${JSON.stringify(b.customId)}`);
+            }
+
+            // ── 6. Click first non-disabled button that looks like Buy ──
+            const buyBtn = buttons.find(b => !b.disabled && (b.label || '').toLowerCase().includes('buy'));
+            if (!buyBtn) {
+                log('warn', '[STUDY] No Buy-like button found — trying first non-disabled button');
+                const firstBtn = buttons.find(b => !b.disabled);
+                if (!firstBtn) { log('warn', '[STUDY] No clickable buttons at all'); return; }
+            }
+
+            const targetBtn = buyBtn || buttons.find(b => !b.disabled);
+            if (!targetBtn || !targetBtn.customId) { log('warn', '[STUDY] No button with customId to click'); return; }
+
+            log('info', `[STUDY] Clicking: label=${JSON.stringify(targetBtn.label)} customId=${JSON.stringify(targetBtn.customId)}`);
+            try {
+                await res.clickButton(targetBtn.customId);
+                log('info', '[STUDY] ✓ Click succeeded — waiting for follow-up message');
+            } catch (e) {
+                log('warn', `[STUDY] Click failed: ${e.message}`);
+                return;
+            }
+
+            await sleep(2000);
+
+            // Try to fetch updated message
+            try {
+                const updated = await channel.messages.fetch(res.id, { force: true });
+                let updPlain;
+                try { updPlain = JSON.parse(JSON.stringify(updated.components || [])); } catch { updPlain = []; }
+                const updRaw = JSON.stringify(updPlain, null, 2);
+                log('info', `[STUDY] POST-CLICK components (${updRaw.length} chars):`);
+                const updChunks = Math.ceil(updRaw.length / chunkSize);
+                for (let i = 0; i < updChunks; i++) {
+                    log('info', `[STUDY] UPD[${i}/${updChunks}] ${updRaw.slice(i * chunkSize, (i + 1) * chunkSize)}`);
+                }
+                const updBtns = collectButtons(updPlain);
+                for (const b of updBtns) {
+                    log('info', `[STUDY] UPD_BTN label=${JSON.stringify(b.label)} customId=${JSON.stringify(b.customId)} disabled=${b.disabled}`);
+                }
+            } catch (e) {
+                log('warn', `[STUDY] Fetch updated msg failed: ${e.message}`);
+            }
+
+            log('info', '[STUDY] === Study complete ===');
+        });
+    }
+
     Promise.all([
         configReloadLoop(), heartbeatLoop(),
+        cycleLoop(),
         huntLoop(), digLoop(),
         searchLoop(), begLoop(), crimeLoop(), hlLoop(), pmLoop(), advLoop(),
-        transferLoop(),
+        fishLoop(), transferLoop(),
+        marketSniperLoop(),
+        studyMarketView(),
     ]).catch(e => log('error', `Fatal: ${e.message}`));
 });
 
