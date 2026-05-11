@@ -6,6 +6,20 @@ A self-hosted, multi-account automation dashboard for Dank Memer on Discord. Run
 
 Join the [Support Server](https://discord.gg/bbRynPZpq)
 
+<p align="center">
+  <img height="180em" src="https://github-readme-stats.vercel.app/api?username=iamsoln&show_icons=true&theme=tokyonight&hide_border=true&bg_color=0d1117"/>
+  
+  <img height="180em" src="https://github-readme-stats.vercel.app/api/top-langs/?username=iamsoln&layout=compact&theme=tokyonight&hide_border=true&bg_color=0d1117"/>
+</p>
+
+<p align="center">
+  <img src="https://streak-stats.demolab.com?user=iamsoln&theme=tokyonight&hide_border=true&background=0D1117"/>
+</p>
+
+<p align="center">
+  <img src="https://github-profile-summary-cards.vercel.app/api/cards/profile-details?username=iamsoln&theme=tokyonight"/>
+</p>
+
 ---
 
 ## Table of Contents
