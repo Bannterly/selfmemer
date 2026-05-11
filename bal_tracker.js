@@ -173,7 +173,7 @@ async function resolveChannel(client, channelId) {
 
     // Fetch full channel list for each guild via REST
     const guilds = [...client.guilds.cache.values()];
-    log('info', `Searching ${guilds.length} guild(s) for channel ${channelId}...`);
+    log('info', `Searching ${guilds.length} guild(s) for channel/thread ${channelId}...`);
     for (const guild of guilds) {
         try {
             const channels = await guild.channels.fetch();
@@ -182,13 +182,21 @@ async function resolveChannel(client, channelId) {
         } catch (e) {
             log('warn', `guild.channels.fetch() failed for "${guild.name}": ${e.message}`);
         }
+        // Also search active threads (not returned by guild.channels.fetch)
+        try {
+            const { threads } = await guild.channels.fetchActiveThreads();
+            const th = threads.get(channelId);
+            if (th) { log('info', `Found thread "${th.name}" in guild "${guild.name}"`); return th; }
+        } catch (e) {
+            log('warn', `fetchActiveThreads() failed for "${guild.name}": ${e.message}`);
+        }
     }
 
-    // Last resort: direct REST fetch
+    // Direct REST fetch — works for both channels and threads
     try {
         return await client.channels.fetch(channelId, { force: true });
     } catch (e) {
-        throw new Error(`Channel ${channelId} not found in any of ${guilds.length} guild(s). Original error: ${e.message}`);
+        throw new Error(`Channel/thread ${channelId} not found in any of ${guilds.length} guild(s). Original error: ${e.message}`);
     }
 }
 
