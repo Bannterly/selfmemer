@@ -327,10 +327,15 @@
           </div>
           <div class="status-card" id="status-stealth">
             <span class="status-name">Limit Flags</span>
-            <label class="bal-toggle" title="Strict anti-detection — typing delays, jitter, proper headers">
+            <label class="bal-toggle" title="Behavioral anti-detection — typing delays, cooldown jitter, uptime cycling. Headers are always on regardless.">
               <input type="checkbox" id="limit-flags-toggle">
               <span class="bal-toggle-track"><span class="bal-toggle-thumb"></span></span>
             </label>
+          </div>
+          <div class="status-card" id="status-fingerprint">
+            <span class="status-dot"></span>
+            <span class="status-name">Browser Fingerprint</span>
+            <span class="status-badge">Always On</span>
           </div>
         </div>
       </div>

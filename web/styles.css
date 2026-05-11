@@ -1991,6 +1991,18 @@ body {
 #status-stealth { gap: 10px; }
 #status-stealth.stealth-on .status-name { color: var(--green); }
 
+/* Browser fingerprint card — permanently green, no toggle */
+#status-fingerprint .status-dot {
+  background: var(--green);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+#status-fingerprint .status-badge {
+  background: var(--green-bg);
+  color: var(--green-fg);
+  border-color: color-mix(in srgb, var(--green) 25%, transparent);
+}
+#status-fingerprint .status-name { color: var(--green); }
+
 .stealth-card {
   display: flex;
   flex-direction: column;
