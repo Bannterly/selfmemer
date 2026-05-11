@@ -4,6 +4,7 @@
 
 A self-hosted, multi-account automation dashboard for Dank Memer on Discord. Runs any number of accounts simultaneously from a single web UI, tracks balance and net worth over time, snipers the market, and coordinates inventory transfers between accounts using a mothership system, all with built-in anti-detection.
 
+Join the [Support Server](https://discord.gg/bbRynPZpq)
 ---
 
 ## Table of Contents
