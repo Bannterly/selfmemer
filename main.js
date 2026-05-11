@@ -129,6 +129,7 @@ class Mutex {
 }
 
 // ── Browser fingerprint ──────────────────────────────────────
+// ALWAYS ACTIVE — applied unconditionally at client init, independent of limit_flags.
 // Matches a real Chrome 103 on Chrome OS session (captured from Discord web client).
 const DISCORD_UA = 'Mozilla/5.0 (X11; CrOS x86_64 14816.131.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.0.0 Safari/537.36';
 
