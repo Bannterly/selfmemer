@@ -1,11 +1,5 @@
 ![SelfMemer](docs/selfmemer.png)
 
-# SelfMemer Dashboard
-
-A self-hosted, multi-account automation dashboard for Dank Memer on Discord. Runs any number of accounts simultaneously from a single web UI, tracks balance and net worth over time, snipers the market, and coordinates inventory transfers between accounts using a mothership system, all with built-in anti-detection.
-
-Join the [Support Server](https://discord.gg/bbRynPZpq)
-
 <p align="center">
   <img src="https://img.shields.io/github/stars/iamsoln/selfmemer?style=flat-square">
   <img src="https://img.shields.io/github/forks/iamsoln/selfmemer?style=flat-square">
@@ -13,6 +7,12 @@ Join the [Support Server](https://discord.gg/bbRynPZpq)
   <img src="https://img.shields.io/github/license/iamsoln/selfmemer?style=flat-square">
   <img src="https://img.shields.io/github/last-commit/iamsoln/selfmemer?style=flat-square">
 </p>
+
+# SelfMemer Dashboard
+
+A self-hosted, multi-account automation dashboard for Dank Memer on Discord. Runs any number of accounts simultaneously from a single web UI, tracks balance and net worth over time, snipers the market, and coordinates inventory transfers between accounts using a mothership system, all with built-in anti-detection.
+
+Join the [Support Server](https://discord.gg/bbRynPZpq)
 
 ---
 
