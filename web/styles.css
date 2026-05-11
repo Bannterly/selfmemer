@@ -327,6 +327,11 @@ body {
   display: flex; flex-direction: column; gap: 8px;
 }
 
+/* Desktop 2-col pair wrappers — mobile: stack, desktop: side-by-side */
+.desk-full { display: contents; }
+.desk-pair { display: contents; }
+.desk-col  { display: contents; }
+
 /* ── Section header ──────────────────────────────── */
 .section-title {
   font-size: 11px; font-weight: 700;
@@ -1207,12 +1212,29 @@ body {
 
 /* ── Desktop enhancements (≥ 880px) ─────────────── */
 @media (min-width: 880px) {
-  :root        { --max-w: 760px; }
+  :root        { --max-w: 1080px; }
   .main        { padding-top: 36px; }
-  .container   { gap: 10px; }
+  .container   { gap: 12px; }
   .chart-wrap  { height: 200px; }
   .log-feed    { height: 320px; }
   .cmd-grid    { grid-template-columns: repeat(4, 1fr); }
+
+  /* Activate 2-column pairing */
+  .desk-full { display: block; }
+  .desk-pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    align-items: stretch;
+  }
+  .desk-col { display: flex; flex-direction: column; gap: 8px; height: 100%; }
+  .desk-col .card:last-child { flex: 1; }
+
+  /* Balance + Net Worth charts taller side-by-side */
+  .desk-pair .chart-wrap { height: 220px; }
+
+  /* Fishing status card full width within its desk-full */
+  .fish-status-card { width: 100%; }
 }
 
 /* ── Mobile (< 600px) ────────────────────────────── */
@@ -1320,4 +1342,878 @@ body {
     justify-content: center;
   }
   .toast.show { transform: translateY(0); }
+}
+
+/* ── Fishing ─────────────────────────────────────────── */
+
+/* Fish toggle card (its own section) */
+.fish-toggle-card {
+  padding: 0;
+  overflow: hidden;
+}
+.fish-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  cursor: pointer;
+  user-select: none;
+  width: 100%;
+}
+.fish-toggle-row:hover {
+  background: var(--hover);
+}
+.fish-toggle-row .cmd-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(37,99,235,0.08);
+  color: #2563eb;
+  flex-shrink: 0;
+}
+[data-theme="dark"] .fish-toggle-row .cmd-icon {
+  background: rgba(96,165,250,0.1);
+  color: #60a5fa;
+}
+.fish-toggle-row .cmd-icon svg {
+  width: 18px;
+  height: 18px;
+}
+.fish-toggle-row .cmd-info {
+  flex: 1;
+  min-width: 0;
+}
+.fish-toggle-row .cmd-name {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.fish-toggle-row .cmd-code {
+  display: block;
+  font-size: 11px;
+  color: var(--fg-muted);
+  margin-top: 1px;
+}
+
+/* Sell currency picker row inside fish card */
+.fish-currency-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px 14px 18px;
+  border-top: 1px solid var(--border);
+}
+.fish-currency-label {
+  font-size: 12px;
+  color: var(--fg-muted);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.fish-currency-row .seg-group {
+  display: flex;
+  gap: 0;
+}
+.fish-currency-row .seg-btn {
+  padding: 4px 14px;
+  font-size: 12px;
+}
+
+/* Fish card accent (legacy, kept for safety) */
+.cmd-card-fish .cmd-icon {
+  color: #2563eb;
+}
+[data-theme="dark"] .cmd-card-fish .cmd-icon {
+  color: #60a5fa;
+}
+
+/* Dimmed non-fish cards when exclusive mode is on */
+.cmd-card.fish-exclusive-dim {
+  opacity: 0.38;
+  pointer-events: none;
+}
+
+/* Exclusive mode warning note */
+.fish-exclusive-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: var(--r);
+  background: var(--amber-bg);
+  color: var(--amber-fg);
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 4px;
+  border: 1px solid rgba(217, 119, 6, 0.2);
+}
+[data-theme="dark"] .fish-exclusive-note {
+  background: rgba(251, 191, 36, 0.08);
+  border-color: rgba(251, 191, 36, 0.18);
+  color: #fbbf24;
+}
+
+/* Fishing status card */
+.fish-status-card {
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.fish-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.fish-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border);
+  flex-shrink: 0;
+  transition: background 0.3s;
+}
+.fish-status-dot.fish-dot-active {
+  background: var(--green);
+  box-shadow: 0 0 0 3px var(--green-bg);
+  animation: fish-pulse 1.8s ease-in-out infinite;
+}
+@keyframes fish-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px var(--green-bg); }
+  50%       { box-shadow: 0 0 0 6px transparent; }
+}
+
+.fish-status-text {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+/* Fish stats row */
+.fish-stat-row {
+  display: flex;
+  gap: 10px;
+}
+
+.fish-stat-card {
+  flex: 1;
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.fish-stat-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-1);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.fish-stat-label {
+  font-size: 11px;
+  color: var(--text-3);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Fish chart */
+.fish-chart-wrap {
+  width: 100%;
+  height: 170px;
+  margin-top: 4px;
+}
+
+/* Fish chart legend */
+.fish-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 8px 0 2px;
+}
+.fish-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-2);
+  font-weight: 500;
+}
+.fish-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.fish-legend-name {
+  white-space: nowrap;
+}
+
+/* ── Market Sniper ───────────────────────────────────────── */
+
+.sniper-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.sniper-header-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.sniper-header-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sniper-header-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-1);
+  letter-spacing: -0.1px;
+}
+
+.sniper-header-desc {
+  font-size: 11.5px;
+  color: var(--text-3);
+  line-height: 1.5;
+}
+
+.sniper-header-desc code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--text-2);
+}
+
+.sniper-cooldown-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.sniper-cooldown-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+
+.sniper-cooldown-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 4px 8px;
+}
+
+.sniper-cooldown-input {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+  background: transparent;
+  border: none;
+  outline: none;
+  width: 54px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.sniper-cooldown-input::-webkit-inner-spin-button,
+.sniper-cooldown-input::-webkit-outer-spin-button { -webkit-appearance: none; }
+.sniper-cooldown-input:focus { color: var(--blue); }
+
+.sniper-cooldown-unit {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.sniper-cooldown-hint {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+/* Stats bar */
+.sniper-stats-bar {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.sniper-stat {
+  flex: 1;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sniper-stat-divider {
+  width: 1px;
+  background: var(--border-soft);
+  flex-shrink: 0;
+}
+
+.sniper-stat-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-3);
+}
+
+.sniper-stat-value {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-1);
+  letter-spacing: -0.3px;
+}
+
+.sniper-stat-value.sniper-stat-small {
+  font-size: 11px;
+  color: var(--text-2);
+  font-weight: 500;
+}
+
+/* Recent buys feed */
+.sniper-feed {
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 6px 0;
+}
+
+.sniper-feed-empty {
+  padding: 16px 18px;
+  font-size: 12px;
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+.sniper-buy-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 18px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12px;
+  transition: background 0.1s;
+}
+.sniper-buy-row:last-child { border-bottom: none; }
+.sniper-buy-row:hover { background: var(--bg-2); }
+
+.sniper-buy-item {
+  font-weight: 600;
+  color: var(--text-1);
+  flex: 1;
+  text-transform: capitalize;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sniper-buy-price {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--green-fg);
+  flex-shrink: 0;
+}
+
+.sniper-buy-unit {
+  font-weight: 400;
+  color: var(--text-3);
+  font-size: 10px;
+  margin-left: 2px;
+}
+
+.sniper-buy-qty {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.sniper-buy-time {
+  font-size: 10px;
+  color: var(--text-3);
+  flex-shrink: 0;
+  min-width: 50px;
+  text-align: right;
+}
+
+/* Watch list header (outside card) */
+.sniper-items-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 0 6px;
+}
+
+.sniper-items-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: var(--text-3);
+}
+
+.sniper-items-sub {
+  font-size: 11px;
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+/* Items card */
+.sniper-items-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.sniper-items-empty {
+  padding: 14px 18px;
+  font-size: 12px;
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+/* Table */
+.sniper-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.sniper-table thead th {
+  padding: 8px 16px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-3);
+  text-align: left;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-2);
+}
+
+.sniper-table tbody tr:hover { background: var(--bg-2); }
+.sniper-table tbody tr { border-bottom: 1px solid var(--border-soft); transition: background 0.1s; }
+.sniper-table tbody tr:last-child { border-bottom: none; }
+
+.sniper-td-name {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+  text-transform: capitalize;
+}
+
+.sniper-td-price {
+  padding: 8px 12px;
+}
+
+.sniper-price-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--green-fg);
+  background: var(--green-bg);
+  border: 1px solid color-mix(in srgb, var(--green) 25%, transparent);
+  border-radius: 20px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+
+.sniper-td-qty {
+  padding: 8px 12px;
+}
+
+.sniper-qty-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--blue) 22%, transparent);
+  border-radius: 20px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+
+.sniper-td-del {
+  padding: 10px 12px 10px 4px;
+  text-align: right;
+}
+
+.sniper-del-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.sniper-del-btn:hover {
+  background: var(--red-bg);
+  color: var(--red-fg);
+  border-color: color-mix(in srgb, var(--red) 25%, transparent);
+}
+.sniper-del-btn .icon { width: 12px; height: 12px; }
+
+/* Add row */
+.sniper-add-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-2);
+}
+
+.sniper-add-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.sniper-add-field-sm {
+  flex: 0 0 80px;
+}
+
+.sniper-add-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-3);
+  padding-left: 2px;
+  white-space: nowrap;
+}
+
+.sniper-add-input {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-1);
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 6px 10px;
+  outline: none;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  transition: border-color 0.15s;
+}
+.sniper-add-input::placeholder { color: var(--text-3); font-size: 12px; }
+.sniper-add-input:focus { border-color: var(--blue); }
+.sniper-add-input::-webkit-inner-spin-button,
+.sniper-add-input::-webkit-outer-spin-button { -webkit-appearance: none; }
+
+.sniper-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: var(--r-sm);
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+  margin-bottom: 0;
+  transition: opacity 0.15s;
+}
+.sniper-add-btn:hover { opacity: 0.85; }
+.sniper-add-btn .icon { width: 13px; height: 13px; }
+
+/* Total cost in feed */
+.sniper-buy-total {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+
+@media (max-width: 599px) {
+  .sniper-stats-bar  { flex-wrap: wrap; }
+  .sniper-stat-divider { display: none; }
+  .sniper-stat       { flex: 1 1 48%; }
+  .sniper-add-row    { flex-wrap: wrap; }
+  .sniper-add-field  { flex: 1 1 140px; }
+  .sniper-add-field-sm { flex: 0 0 70px; }
+  .sniper-items-sub  { display: none; }
+  .sniper-buy-total  { display: none; }
+}
+
+/* ── Stealth / Limit Flags ──────────────────────────── */
+#status-stealth { gap: 10px; }
+#status-stealth.stealth-on .status-name { color: var(--green); }
+
+.stealth-card {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px 20px;
+}
+
+/* ── Stealth mode selector ──────────────────────────── */
+.smode-selector {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+@media (max-width: 520px) {
+  .smode-selector { grid-template-columns: repeat(2, 1fr); }
+}
+
+.smode-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 11px 8px;
+  background: var(--bg-2);
+  border: 1.5px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  text-align: center;
+}
+.smode-btn:hover {
+  border-color: var(--border);
+  background: var(--bg-3);
+}
+.smode-btn.smode-active {
+  border-color: var(--accent);
+  background: rgba(88,101,242,0.08);
+}
+[data-theme="dark"] .smode-btn.smode-active {
+  background: rgba(88,101,242,0.12);
+}
+
+.smode-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-1);
+  letter-spacing: 0.01em;
+}
+.smode-btn.smode-active .smode-name { color: var(--accent); }
+
+.smode-sub {
+  font-size: 10px;
+  color: var(--text-3);
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+/* Mode detail pills row */
+.smode-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-height: 22px;
+}
+
+.smode-pill {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-2);
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 20px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+.smode-speed {
+  color: var(--accent);
+  border-color: rgba(88,101,242,0.3);
+  background: rgba(88,101,242,0.07);
+}
+
+/* ── Stealth Settings rows ──────────────────────────── */
+.stealth-settings-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.stealth-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 0;
+  border-top: 1px solid var(--border-soft);
+  flex-wrap: wrap;
+}
+
+.stealth-row-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1 1 160px;
+}
+
+.stealth-row-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.stealth-row-desc {
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.45;
+}
+
+/* shared input/unit pair used by both rows */
+.stealth-sleep-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.stealth-num-input {
+  width: 70px;
+  padding: 5px 8px;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-1);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  outline: none;
+  text-align: right;
+  transition: border-color 0.15s;
+}
+.stealth-num-input:focus { border-color: var(--accent); }
+.stealth-num-input::-webkit-outer-spin-button,
+.stealth-num-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.stealth-num-input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+.stealth-num-sm { width: 56px; }
+
+.stealth-unit {
+  font-size: 12px;
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+/* Cycle inputs */
+.stealth-cycle-inputs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.stealth-cycle-field {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.stealth-cycle-sep {
+  font-size: 14px;
+  color: var(--text-3);
+  font-weight: 600;
+}
+
+.stealth-cycle-tag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 2px 5px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.stealth-tag-up   { background: rgba(87,242,135,0.15); color: #57f287; border: 1px solid rgba(87,242,135,0.3); }
+.stealth-tag-down { background: rgba(237,66,69,0.15);  color: #ed4245; border: 1px solid rgba(237,66,69,0.3); }
+
+/* Cycle status badge */
+.stealth-cycle-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  background: rgba(87,242,135,0.07);
+  border: 1px solid rgba(87,242,135,0.2);
+  border-radius: var(--r-sm);
+  margin-top: 4px;
+}
+.stealth-cycle-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #57f287;
+  animation: pulse-green 1.5s ease-in-out infinite;
+}
+.stealth-cycle-status-text {
+  font-size: 11px;
+  color: #57f287;
+  font-weight: 600;
+}
+@keyframes pulse-green {
+  0%,100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
+/* Reset button */
+.fish-reset-btn {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-3);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 9px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.fish-reset-btn:hover {
+  color: var(--text-1);
+  border-color: var(--text-3);
 }

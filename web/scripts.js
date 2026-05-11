@@ -2,14 +2,16 @@
 const root        = document.documentElement;
 const themeToggle = document.getElementById("theme-toggle");
 const themeIcon   = document.getElementById("theme-icon");
-let balChart = null;
-let nwChart  = null;
+let balChart  = null;
+let nwChart   = null;
+let fishChart = null;
 
 function applyTheme(t) {
   root.setAttribute("data-theme", t);
   themeIcon.innerHTML = t === "dark" ? `<use href="#icon-sun"/>` : `<use href="#icon-moon"/>`;
   localStorage.setItem("db-theme", t);
   if (balChart) updateChartTheme();
+  updateFishChartTheme();
 }
 themeToggle.addEventListener("click", () =>
   applyTheme(root.getAttribute("data-theme") === "dark" ? "light" : "dark")
@@ -86,13 +88,17 @@ let _logInterval      = null;
 let _statusInterval   = null;
 let _tabDotInterval   = null;
 let _transferInterval = null;
+let _fishStatsInterval = null;
 
 function clearPolls() {
   clearInterval(_balInterval);
   clearInterval(_logInterval);
   clearInterval(_statusInterval);
   clearInterval(_transferInterval);
-  _transferInterval = null;
+  clearInterval(_fishStatsInterval);
+  _transferInterval  = null;
+  _fishStatsInterval = null;
+  clearSniperPolls();
 }
 
 /* ── Balance chart ──────────────────────────────────── */
@@ -307,6 +313,89 @@ async function fetchBalance() {
     }
   } catch {}
 }
+
+/* ── Interaction Lock toggle ────────────────────────── */
+function updateLockToggleUI(locked) {
+  const toggle = document.getElementById("lock-toggle");
+  if (toggle) toggle.checked = locked;
+}
+
+document.getElementById("lock-toggle").addEventListener("change", function () {
+  const locked = this.checked;
+  updateLockToggleUI(locked);
+  pushAccountConfig({ disable_interaction_lock: !locked });
+  showToast(locked ? "Interaction Lock enabled" : "Interaction Lock disabled (parallel mode)");
+});
+
+/* ── Limit Flags toggle ─────────────────────────────── */
+function updateLimitFlagsUI(enabled) {
+  const toggle  = document.getElementById("limit-flags-toggle");
+  const card    = document.getElementById("status-stealth");
+  const section = document.getElementById("stealth-section");
+  if (toggle)  toggle.checked = enabled;
+  if (card)    card.classList.toggle("stealth-on", enabled);
+  if (section) section.style.display = enabled ? "" : "none";
+}
+
+document.getElementById("limit-flags-toggle").addEventListener("change", function () {
+  const enabled = this.checked;
+  updateLimitFlagsUI(enabled);
+  pushAccountConfig({ limit_flags: enabled });
+  showToast(enabled ? "Limit Flags ON — stealth mode active" : "Limit Flags disabled");
+});
+
+/* ── Cycle uptime / downtime (debounced) ──────────────── */
+let _cycleTimer;
+function _saveCycle() {
+  clearTimeout(_cycleTimer);
+  _cycleTimer = setTimeout(() => {
+    const up   = Math.max(0, parseInt(document.getElementById("stealth-uptime")?.value, 10) || 0);
+    const down = Math.max(0, parseInt(document.getElementById("stealth-downtime")?.value, 10) || 0);
+    pushAccountConfig({ cycle_uptime_mins: up, cycle_downtime_mins: down });
+    if (up && down) {
+      showToast(`Cycle set — active ${up}min / rest ${down}min`);
+      const badge = document.getElementById("stealth-cycle-status");
+      if (badge) badge.style.display = "";
+    } else {
+      showToast("Cycle disabled");
+      const badge = document.getElementById("stealth-cycle-status");
+      if (badge) badge.style.display = "none";
+    }
+  }, 700);
+}
+document.getElementById("stealth-uptime")?.addEventListener("input", _saveCycle);
+document.getElementById("stealth-downtime")?.addEventListener("input", _saveCycle);
+
+/* ── Stealth mode selector ───────────────────────────── */
+const SMODE_DETAILS = {
+  strict:   { typing: "Always — 700–1400ms",  variance: "35% (uniform spread)", speed: "Slowest" },
+  moderate: { typing: "80% — 300–600ms",      variance: "20% (biased low)",     speed: "Moderate" },
+  casual:   { typing: "40% — 100–300ms",      variance: "10% (heavily biased)", speed: "Fast" },
+  fast:     { typing: "Off",                  variance: "None",                 speed: "Maximum" },
+};
+
+function applySteathMode(mode) {
+  document.querySelectorAll(".smode-btn").forEach(b => {
+    b.classList.toggle("smode-active", b.dataset.mode === mode);
+  });
+  const d = SMODE_DETAILS[mode];
+  const el = document.getElementById("smode-detail");
+  if (el && d) {
+    el.innerHTML =
+      `<span class="smode-pill">Typing ${d.typing}</span>` +
+      `<span class="smode-pill">CD variance ${d.variance}</span>` +
+      `<span class="smode-pill smode-speed">Speed ${d.speed}</span>`;
+  }
+}
+
+document.querySelectorAll(".smode-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const mode = btn.dataset.mode;
+    applySteathMode(mode);
+    pushAccountConfig({ stealth_mode: mode });
+    showToast(`Stealth mode: ${mode.charAt(0).toUpperCase() + mode.slice(1)}`);
+  });
+});
 
 /* ── Balance Tracker toggle ─────────────────────────── */
 async function setBalTracker(enabled) {
@@ -632,9 +721,16 @@ function switchAccount(id) {
   applyRisk("crime",  acc.crime_risk  || "medium");
 
   const cmds = acc.commands_enabled || {};
-  ["hunt","dig","search","beg","crime","hl","pm","adv"].forEach(cmd => {
+  ["hunt","dig","search","beg","crime","hl","pm","adv","fish"].forEach(cmd => {
     applyToggle(cmd, cmds[cmd] === true);
   });
+
+  // Sync fishing exclusive UI
+  const fishOn = cmds.fish === true;
+  applyFishUI(fishOn);
+
+  // Sync fish sell currency
+  applyFishCurrency(acc.fish_sell_currency || 'coins');
 
   // Adventure type
   setAdvValue(acc.adv_type || "Pepe Goes to Space");
@@ -644,10 +740,25 @@ function switchAccount(id) {
   const activeBtn = document.querySelector(`.log-filter-btn[data-filter="${st.logFilter}"]`);
   if (activeBtn) activeBtn.classList.add("active");
 
-  // Update mothership UI and bal-tracker toggle for this account
+  // Update mothership UI and bal-tracker + lock toggles for this account
   updateMothershipUI();
   const _acc = accounts.find(a => a.id === id);
   updateBalToggleUI(!_acc || _acc.bal_tracker_enabled !== false);
+  updateLockToggleUI(!_acc || _acc.disable_interaction_lock !== true);
+  updateLimitFlagsUI(!!(_acc && _acc.limit_flags));
+
+  const uptimeInput   = document.getElementById("stealth-uptime");
+  const downtimeInput = document.getElementById("stealth-downtime");
+  if (uptimeInput   && _acc) uptimeInput.value   = _acc.cycle_uptime_mins   ?? 0;
+  if (downtimeInput && _acc) downtimeInput.value = _acc.cycle_downtime_mins ?? 0;
+  // Restore stealth mode
+  applySteathMode(_acc?.stealth_mode ?? 'moderate');
+  // Restore cycle badge visibility
+  const cycleBadge = document.getElementById("stealth-cycle-status");
+  if (cycleBadge) {
+    const hasCycle = (_acc?.cycle_uptime_mins > 0) && (_acc?.cycle_downtime_mins > 0);
+    cycleBadge.style.display = hasCycle ? "" : "none";
+  }
 
   // Start polling
   fetchBalance();
@@ -656,6 +767,10 @@ function switchAccount(id) {
   _balInterval    = setInterval(fetchBalance, 30000);
   _statusInterval = setInterval(fetchStatus,  5000);
   _logInterval    = setInterval(fetchLogs,    3000);
+
+  // Market Sniper
+  loadSniperConfig();
+  startSniperPolling();
 }
 
 /* ── Render tab bar ─────────────────────────────────── */
@@ -721,7 +836,7 @@ async function deleteAccount(id, name) {
 
 /* ── Push account config ────────────────────────────── */
 async function pushAccountConfig(payload) {
-  if (!activeId) return;
+  if (!activeId) { showToast("No account selected — select an account first", "err"); return; }
   setBadge("saving");
   try {
     const res  = await fetch(`/api/accounts/${activeId}`, {
@@ -775,7 +890,7 @@ document.getElementById("conn-save").addEventListener("click", async () => {
     bot_id:     document.getElementById("conn-botid").value.trim(),
   };
   if (!payload.token)      { showToast("Token is required", "err"); return; }
-  if (!payload.channel_id) { showToast("Channel ID is required", "err"); return; }
+  if (!payload.channel_id) { showToast("Channel / Thread ID is required", "err"); return; }
 
   await pushAccountConfig(payload);
   showToast("Saved — bot restarting…");
@@ -788,12 +903,14 @@ document.getElementById("conn-save").addEventListener("click", async () => {
 
 /* ── Token reveal ───────────────────────────────────── */
 function setupReveal(inputId, btnId, iconId) {
-  document.getElementById(btnId).addEventListener("click", () => {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  btn.addEventListener("click", () => {
     const input = document.getElementById(inputId);
     const icon  = document.getElementById(iconId);
     const show  = input.type === "password";
     input.type  = show ? "text" : "password";
-    icon.innerHTML = show ? `<use href="#icon-eye-off"/>` : `<use href="#icon-eye"/>`;
+    if (icon) icon.innerHTML = show ? `<use href="#icon-eye-off"/>` : `<use href="#icon-eye"/>`;
   });
 }
 setupReveal("conn-token", "conn-reveal", "conn-eye-icon");
@@ -801,13 +918,270 @@ setupReveal("m-token",    "m-reveal",    "m-eye-icon");
 
 /* ── Toggle helpers ─────────────────────────────────── */
 const cmdState = {
-  hunt:true, dig:true, search:true, beg:true, crime:true, hl:true, pm:true, adv:false,
+  hunt:true, dig:true, search:true, beg:true, crime:true, hl:true, pm:true, adv:false, fish:false,
 };
 
 function applyToggle(cmd, enabled) {
   cmdState[cmd] = enabled;
   document.querySelector(`.toggle[data-cmd="${cmd}"]`)?.classList.toggle("on", enabled);
   document.querySelector(`.cmd-card[data-cmd="${cmd}"]`)?.classList.toggle("disabled", !enabled);
+}
+
+function applyFishCurrency(currency) {
+  document.querySelectorAll("#fish-currency-seg .seg-btn").forEach(btn => {
+    const active = btn.dataset.currency === currency;
+    btn.className = "seg-btn" + (active ? " active-low" : "");
+  });
+}
+
+function applyFishUI(fishOn) {
+  const note      = document.getElementById("fish-exclusive-note");
+  const secTitle  = document.getElementById("fish-section-title");
+  const secCard   = document.getElementById("fish-status-card");
+  if (note)     note.style.display     = fishOn ? "" : "none";
+  if (secTitle) secTitle.style.display = fishOn ? "" : "none";
+  if (secCard)  secCard.style.display  = fishOn ? "" : "none";
+
+  if (fishOn) startFishStatsPolling();
+  else        stopFishStatsPolling();
+
+  // Dim all other cmd-cards visually when fish is exclusive
+  document.querySelectorAll(".cmd-card:not([data-cmd='fish'])").forEach(c => {
+    c.classList.toggle("fish-exclusive-dim", fishOn);
+  });
+}
+
+/* ── Fish stats chart (timeline) ─────────────────────── */
+const FISH_COLOR_PALETTE = [
+  "rgba(96,165,250,0.9)",   // blue
+  "rgba(251,146,60,0.9)",   // orange
+  "rgba(192,132,252,0.9)",  // purple
+  "rgba(251,113,133,0.9)",  // pink
+  "rgba(250,204,21,0.9)",   // yellow
+  "rgba(20,184,166,0.9)",   // teal
+  "rgba(239,68,68,0.9)",    // red
+  "rgba(34,197,94,0.9)",    // green
+  "rgba(245,158,11,0.9)",   // amber
+  "rgba(99,102,241,0.9)",   // indigo
+  "rgba(236,72,153,0.9)",   // fuchsia
+  "rgba(14,165,233,0.9)",   // sky
+];
+
+function fishColorFill(line) {
+  return line.replace(/[\d.]+\)$/, "0.07)");
+}
+
+function getFishChartColors() {
+  const dark = root.getAttribute("data-theme") === "dark";
+  return {
+    sellLine:  dark ? "rgba(52,211,153,0.85)"  : "rgba(5,150,105,0.85)",
+    sellFill:  dark ? "rgba(52,211,153,0.05)"  : "rgba(5,150,105,0.05)",
+    grid: dark ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.04)",
+    tick: dark ? "rgba(255,255,255,0.28)" : "rgba(0,0,0,0.30)",
+  };
+}
+
+function _getFishNames(timeline) {
+  const seen = new Set();
+  const names = [];
+  for (const e of timeline) {
+    if (e.fish) {
+      for (const n of Object.keys(e.fish)) {
+        if (!seen.has(n)) { seen.add(n); names.push(n); }
+      }
+    }
+  }
+  return names;
+}
+
+function buildFishChart(timeline) {
+  const canvas = document.getElementById("fish-chart");
+  if (!canvas) return;
+
+  const labels    = timeline.map(e => fmtTime(e.ts));
+  const fishNames = _getFishNames(timeline);
+  const pts       = timeline.length <= 10 ? 3 : 0;
+  const { sellLine, sellFill, grid, tick } = getFishChartColors();
+  const dark = root.getAttribute("data-theme") === "dark";
+
+  if (fishChart) {
+    const existingFish = fishChart.data.datasets
+      .filter(d => d._isFish).map(d => d.label);
+    const same = existingFish.length === fishNames.length &&
+      existingFish.every((n, i) => n === fishNames[i]);
+
+    if (same) {
+      fishChart.data.labels = labels;
+      fishNames.forEach((name, i) => {
+        fishChart.data.datasets[i].data        = timeline.map(e => (e.fish && e.fish[name]) || 0);
+        fishChart.data.datasets[i].pointRadius = pts;
+      });
+      const sellDs = fishChart.data.datasets[fishNames.length];
+      if (sellDs) {
+        sellDs.data        = timeline.map(e => e.sells);
+        sellDs.borderColor = sellLine;
+        sellDs.backgroundColor = sellFill;
+        sellDs.pointRadius = pts;
+      }
+      fishChart.options.scales.x.grid.color  = grid;
+      fishChart.options.scales.y.grid.color  = grid;
+      fishChart.options.scales.x.ticks.color = tick;
+      fishChart.options.scales.y.ticks.color = tick;
+      fishChart.update("none");
+      return;
+    }
+    fishChart.destroy();
+    fishChart = null;
+  }
+
+  const datasets = fishNames.map((name, i) => {
+    const line = FISH_COLOR_PALETTE[i % FISH_COLOR_PALETTE.length];
+    return {
+      label: name,
+      _isFish: true,
+      data: timeline.map(e => (e.fish && e.fish[name]) || 0),
+      borderColor: line, backgroundColor: fishColorFill(line),
+      borderWidth: 2, tension: 0.4, fill: false,
+      pointRadius: pts, pointHoverRadius: 4, pointBackgroundColor: line,
+    };
+  });
+
+  datasets.push({
+    label: "Bucket Sells",
+    _isFish: false,
+    data: timeline.map(e => e.sells),
+    borderColor: sellLine, backgroundColor: sellFill,
+    borderWidth: 2, tension: 0.4, fill: false,
+    borderDash: [5, 3],
+    pointRadius: pts, pointHoverRadius: 4, pointBackgroundColor: sellLine,
+  });
+
+  const ctx = canvas.getContext("2d");
+  fishChart = new Chart(ctx, {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 400 },
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: {
+          display: true,
+          labels: {
+            color: dark ? "rgba(255,255,255,0.5)" : "rgba(0,0,0,0.45)",
+            font: { size: 11 }, boxWidth: 14, padding: 14,
+            usePointStyle: true, pointStyle: "line",
+          },
+        },
+        tooltip: {
+          backgroundColor: dark ? "rgba(30,30,30,0.95)" : "rgba(255,255,255,0.95)",
+          borderColor:     dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)",
+          borderWidth: 1,
+          titleColor: dark ? "#fafafa" : "#09090b",
+          bodyColor:  dark ? "#a1a1aa" : "#52525b",
+          titleFont: { size: 11, weight: "700" }, bodyFont: { size: 11 }, padding: 12,
+          callbacks: {
+            label: item => {
+              const val  = item.parsed.y;
+              const idx  = item.dataIndex;
+              const prev = idx > 0 ? item.dataset.data[idx - 1] : null;
+              const name = item.dataset.label;
+              let ln = `${name}: ${val}`;
+              if (prev !== null && val !== prev) ln += `  (+${val - prev})`;
+              return ln;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { grid: { color: grid, drawBorder: false }, ticks: { color: tick, font: { size: 10 }, maxTicksLimit: 8, maxRotation: 0 }, border: { display: false } },
+        y: { grid: { color: grid, drawBorder: false }, ticks: { color: tick, font: { size: 10 }, maxTicksLimit: 5, precision: 0, stepSize: 1 }, border: { display: false }, beginAtZero: true },
+      },
+    },
+  });
+}
+
+function updateFishChartTheme() {
+  if (!fishChart) return;
+  const { sellLine, sellFill, grid, tick } = getFishChartColors();
+  const dark = root.getAttribute("data-theme") === "dark";
+  fishChart.data.datasets.forEach((ds, i) => {
+    if (ds._isFish) {
+      const line = FISH_COLOR_PALETTE[i % FISH_COLOR_PALETTE.length];
+      ds.borderColor      = line;
+      ds.backgroundColor  = fishColorFill(line);
+      ds.pointBackgroundColor = line;
+    } else {
+      ds.borderColor      = sellLine;
+      ds.backgroundColor  = sellFill;
+      ds.pointBackgroundColor = sellLine;
+    }
+  });
+  fishChart.options.plugins.legend.labels.color = dark ? "rgba(255,255,255,0.5)" : "rgba(0,0,0,0.45)";
+  fishChart.options.scales.x.grid.color  = grid;
+  fishChart.options.scales.y.grid.color  = grid;
+  fishChart.options.scales.x.ticks.color = tick;
+  fishChart.options.scales.y.ticks.color = tick;
+  fishChart.update("none");
+}
+
+function fmtSessionTime(startTs) {
+  const secs = Math.floor((Date.now() / 1000) - startTs);
+  if (secs < 60)   return secs + "s";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60)   return mins + "m";
+  const hrs  = Math.floor(mins / 60);
+  return `${hrs}h ${mins % 60}m`;
+}
+
+function applyFishStats(stats) {
+  const cc = document.getElementById("fish-catch-count");
+  const sc = document.getElementById("fish-sell-count");
+  const st = document.getElementById("fish-session-time");
+  if (cc) cc.textContent = stats.total_catches ?? 0;
+  if (sc) sc.textContent = stats.sells         ?? 0;
+  if (st) st.textContent = fmtSessionTime(stats.session_start ?? (Date.now() / 1000));
+  const timeline = Array.isArray(stats.timeline) ? stats.timeline : [];
+  const wrap = document.getElementById("fish-chart-wrap");
+  if (wrap) wrap.style.display = timeline.length > 0 ? "" : "none";
+  if (timeline.length > 0) buildFishChart(timeline);
+}
+
+async function fetchFishStats() {
+  if (!activeId) return;
+  try {
+    const r = await fetch(`/api/fish-stats/${activeId}`);
+    if (!r.ok) return;
+    applyFishStats(await r.json());
+  } catch {}
+}
+
+function startFishStatsPolling() {
+  fetchFishStats();
+  clearInterval(_fishStatsInterval);
+  _fishStatsInterval = setInterval(fetchFishStats, 3000);
+}
+
+function stopFishStatsPolling() {
+  clearInterval(_fishStatsInterval);
+  _fishStatsInterval = null;
+  if (fishChart) { fishChart.destroy(); fishChart = null; }
+  const cc = document.getElementById("fish-catch-count");
+  const sc = document.getElementById("fish-sell-count");
+  const st = document.getElementById("fish-session-time");
+  if (cc) cc.textContent = "0";
+  if (sc) sc.textContent = "0";
+  if (st) st.textContent = "0m";
+  const wrap = document.getElementById("fish-chart-wrap");
+  if (wrap) wrap.style.display = "none";
+}
+
+function setFishStatus(text, active = true) {
+  const dot = document.getElementById("fish-status-dot");
+  const txt = document.getElementById("fish-status-text");
+  if (dot) dot.className = "fish-status-dot" + (active ? " fish-dot-active" : "");
+  if (txt) txt.textContent = text;
 }
 
 function applyRisk(type, level) {
@@ -820,20 +1194,64 @@ function applyRisk(type, level) {
 }
 
 /* ── Command toggle clicks ──────────────────────────── */
-document.querySelectorAll(".cmd-card").forEach(card => {
-  card.addEventListener("click", () => {
-    const cmd = card.dataset.cmd;
-    applyToggle(cmd, !cmdState[cmd]);
-    pushAccountConfig({ commands_enabled: { ...cmdState } });
+document.querySelectorAll(".cmd-card, .fish-toggle-row").forEach(card => {
+  card.addEventListener("click", async () => {
+    const cmd    = card.dataset.cmd;
+    const newVal = !cmdState[cmd];
+
+    if (cmd === "fish") {
+      if (newVal) {
+        // Exclusive ON: disable all other commands + bal tracker
+        const OTHER_CMDS = ["hunt","dig","search","beg","crime","hl","pm","adv"];
+        OTHER_CMDS.forEach(c => applyToggle(c, false));
+        applyToggle("fish", true);
+        applyFishUI(true);
+        const newCmds = { ...cmdState };
+        await pushAccountConfig({ commands_enabled: newCmds, bal_tracker_enabled: false });
+        const acc = accounts.find(a => a.id === activeId);
+        if (acc) acc.bal_tracker_enabled = false;
+        updateBalToggleUI(false);
+        showToast("Fishing exclusive mode ON — all other commands paused");
+      } else {
+        // Exclusive OFF: just disable fish
+        applyToggle("fish", false);
+        applyFishUI(false);
+        await pushAccountConfig({ commands_enabled: { ...cmdState } });
+        showToast("Fishing disabled");
+      }
+    } else {
+      // Normal command toggle — if fish is active, fish takes precedence (do nothing)
+      if (cmdState.fish) return;
+      applyToggle(cmd, newVal);
+      pushAccountConfig({ commands_enabled: { ...cmdState } });
+    }
   });
+});
+
+/* ── Fish reset button ──────────────────────────────── */
+document.getElementById("fish-reset-btn")?.addEventListener("click", async () => {
+  if (!activeId) return;
+  await fetch(`/api/fish-stats/${activeId}`, { method: "DELETE" });
+  fetchFishStats();
+  showToast("Session stats reset");
 });
 
 /* ── Risk buttons ───────────────────────────────────── */
 document.querySelectorAll(".seg-btn").forEach(btn => {
   btn.addEventListener("click", () => {
+    // Currency picker inside fish card
+    if (btn.closest("#fish-currency-seg")) {
+      const currency = btn.dataset.currency;
+      applyFishCurrency(currency);
+      pushAccountConfig({ fish_sell_currency: currency });
+      return;
+    }
+    // Risk segment buttons
     const { type, level } = btn.dataset;
-    applyRisk(type, level);
-    pushAccountConfig({ [`${type}_risk`]: level });
+    if (type && level) {
+      applyRisk(type, level);
+      pushAccountConfig({ [`${type}_risk`]: level });
+    }
   });
 });
 
@@ -997,6 +1415,198 @@ document.getElementById("transfer-items-btn").addEventListener("click", () => {
 
 document.getElementById("transfer-coins-btn").addEventListener("click", () => {
   triggerTransfer("coins");
+});
+
+/* ── Market Sniper ──────────────────────────────────── */
+let _sniperItems    = [];   // current watch list
+let _sniperInterval = null;
+
+function clearSniperPolls() {
+  clearInterval(_sniperInterval);
+  _sniperInterval = null;
+}
+
+async function loadSniperConfig() {
+  if (!activeId) return;
+  try {
+    const r = await fetch(`/api/accounts/${activeId}/market-sniper`);
+    if (!r.ok) return;
+    const d = await r.json();
+    _sniperItems = Array.isArray(d.items) ? d.items : [];
+    const toggle   = document.getElementById("sniper-toggle");
+    const cooldown = document.getElementById("sniper-cooldown");
+    if (toggle)   toggle.checked  = !!d.enabled;
+    if (cooldown) cooldown.value  = d.cooldown ?? 60;
+    renderSniperItems();
+  } catch {}
+}
+
+async function saveSniperConfig(patch) {
+  if (!activeId) return;
+  try {
+    await fetch(`/api/accounts/${activeId}/market-sniper`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+  } catch {}
+}
+
+function renderSniperItems() {
+  const empty = document.getElementById("sniper-items-empty");
+  const table = document.getElementById("sniper-table");
+  const tbody = document.getElementById("sniper-tbody");
+  if (!tbody) return;
+
+  if (_sniperItems.length === 0) {
+    if (empty) empty.style.display = "";
+    if (table) table.style.display = "none";
+    return;
+  }
+  if (empty) empty.style.display = "none";
+  if (table) table.style.display = "";
+
+  tbody.innerHTML = "";
+  _sniperItems.forEach((item, idx) => {
+    const qty = Math.max(1, item.buy_qty || 1);
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td class="sniper-td-name">${escHtml(item.name)}</td>` +
+      `<td class="sniper-td-price"><span class="sniper-price-badge">⏣ ${Number(item.max_price).toLocaleString()}</span></td>` +
+      `<td class="sniper-td-qty"><span class="sniper-qty-badge">× ${qty}</span></td>` +
+      `<td class="sniper-td-del"><button class="sniper-del-btn" data-idx="${idx}" title="Remove">` +
+        `<svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg></button></td>`;
+    tbody.appendChild(tr);
+  });
+
+  tbody.querySelectorAll(".sniper-del-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const idx = parseInt(btn.dataset.idx, 10);
+      _sniperItems.splice(idx, 1);
+      renderSniperItems();
+      await saveSniperConfig({ items: _sniperItems });
+      showToast("Item removed");
+    });
+  });
+}
+
+async function fetchSniperStats() {
+  if (!activeId) return;
+  try {
+    const r = await fetch(`/api/market-sniper-stats/${activeId}`);
+    if (!r.ok) return;
+    const d = await r.json();
+
+    const buysEl  = document.getElementById("sniper-stat-buys");
+    const coinsEl = document.getElementById("sniper-stat-coins");
+    const lastEl  = document.getElementById("sniper-stat-last");
+    const feedEl  = document.getElementById("sniper-feed");
+    const emptyEl = document.getElementById("sniper-feed-empty");
+
+    if (buysEl)  buysEl.textContent  = d.total_buys ?? 0;
+    if (coinsEl) coinsEl.textContent = fmtCoins(d.total_coins_spent ?? 0);
+
+    const recent = Array.isArray(d.recent_buys) ? d.recent_buys : [];
+    if (recent.length > 0) {
+      const last = recent[recent.length - 1];
+      if (lastEl) lastEl.textContent = `${last.item} @ ${fmtCoins(last.price)} — ${fmtTimeAgo(last.ts)}`;
+    } else {
+      if (lastEl) lastEl.textContent = "—";
+    }
+
+    if (feedEl && emptyEl) {
+      feedEl.querySelectorAll(".sniper-buy-row").forEach(el => el.remove());
+      if (recent.length === 0) {
+        emptyEl.style.display = "";
+      } else {
+        emptyEl.style.display = "none";
+        const frag = document.createDocumentFragment();
+        for (const buy of [...recent].reverse()) {
+          const row = document.createElement("div");
+          row.className = "sniper-buy-row";
+          const total = (buy.price || 0) * (buy.qty || 1);
+          row.innerHTML =
+            `<span class="sniper-buy-item">${escHtml(buy.item)}</span>` +
+            `<span class="sniper-buy-price">${fmtCoins(buy.price)}<span class="sniper-buy-unit">/unit</span></span>` +
+            `<span class="sniper-buy-qty">× ${Number(buy.qty).toLocaleString()}</span>` +
+            `<span class="sniper-buy-total">= ${fmtCoins(total)}</span>` +
+            `<span class="sniper-buy-time">${fmtTimeAgo(buy.ts)}</span>`;
+          frag.appendChild(row);
+        }
+        feedEl.appendChild(frag);
+      }
+    }
+  } catch {}
+}
+
+function startSniperPolling() {
+  fetchSniperStats();
+  clearSniperPolls();
+  _sniperInterval = setInterval(fetchSniperStats, 4000);
+}
+
+function stopSniperPolling() {
+  clearSniperPolls();
+}
+
+// ── Sniper toggle ──
+document.getElementById("sniper-toggle").addEventListener("change", async function () {
+  const enabled = this.checked;
+  await saveSniperConfig({ enabled });
+  showToast(enabled ? "Market Sniper enabled" : "Market Sniper disabled");
+});
+
+// ── Sniper cooldown (debounced save) ──
+let _sniperCooldownTimer;
+document.getElementById("sniper-cooldown").addEventListener("input", function () {
+  clearTimeout(_sniperCooldownTimer);
+  _sniperCooldownTimer = setTimeout(async () => {
+    const v = parseInt(this.value, 10);
+    if (v >= 5) {
+      await saveSniperConfig({ cooldown: v });
+      showToast("Sniper interval saved");
+    }
+  }, 700);
+});
+
+// ── Add item ──
+document.getElementById("sniper-add-btn").addEventListener("click", async () => {
+  const nameEl  = document.getElementById("sniper-add-name");
+  const priceEl = document.getElementById("sniper-add-price");
+  const qtyEl   = document.getElementById("sniper-add-qty");
+  const name    = nameEl.value.trim().toLowerCase();
+  const price   = parseInt(priceEl.value, 10);
+  const qty     = Math.max(1, Math.min(50, parseInt(qtyEl.value, 10) || 1));
+
+  if (!name)        { showToast("Item name is required", "err"); return; }
+  if (!(price > 0)) { showToast("Max price must be > 0", "err"); return; }
+
+  if (_sniperItems.find(i => i.name === name)) {
+    showToast(`"${name}" is already in the watch list`, "err"); return;
+  }
+
+  _sniperItems.push({ name, max_price: price, buy_qty: qty });
+  nameEl.value  = "";
+  priceEl.value = "";
+  qtyEl.value   = "1";
+  renderSniperItems();
+  await saveSniperConfig({ items: _sniperItems });
+  showToast(`Added "${name}" — max ⏣${price.toLocaleString()} × ${qty}`);
+});
+
+// ── Enter key on add inputs ──
+["sniper-add-name", "sniper-add-price", "sniper-add-qty"].forEach(id => {
+  document.getElementById(id).addEventListener("keydown", e => {
+    if (e.key === "Enter") document.getElementById("sniper-add-btn").click();
+  });
+});
+
+// ── Reset stats ──
+document.getElementById("sniper-reset-btn").addEventListener("click", async () => {
+  if (!activeId) return;
+  await fetch(`/api/market-sniper-stats/${activeId}`, { method: "DELETE" });
+  fetchSniperStats();
+  showToast("Sniper stats reset");
 });
 
 /* ── Boot ───────────────────────────────────────────── */
