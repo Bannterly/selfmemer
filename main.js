@@ -46,9 +46,13 @@ const _cfg = {
     pm_cooldown:       config.pm_cooldown       ?? 20,
     adv_cooldown:      config.adv_cooldown      ?? 1800,
     wait_for_response: config.wait_for_response ?? 10,
-    search_risk:       config.search_risk       ?? 'medium',
-    crime_risk:        config.crime_risk        ?? 'medium',
+    search_risk:           config.search_risk           ?? 'medium',
+    crime_risk:            config.crime_risk            ?? 'medium',
+    search_custom_ranking: Array.isArray(config.search_custom_ranking) ? config.search_custom_ranking : [],
+    crime_custom_ranking:  Array.isArray(config.crime_custom_ranking)  ? config.crime_custom_ranking  : [],
     adv_type:          config.adv_type          ?? 'Pepe Goes to Space',
+    adv_response_mode:    config.adv_response_mode    ?? 'recommended',
+    adv_custom_responses: config.adv_custom_responses ?? {},
     fish_sell_currency:        config.fish_sell_currency        ?? 'coins',
     disable_interaction_lock:  config.disable_interaction_lock  ?? false,
     limit_flags:               config.limit_flags               ?? false,
@@ -98,6 +102,14 @@ async function configReloadLoop() {
             if (fresh.market_sniper_items !== undefined) {
                 _cfg.market_sniper_items = fresh.market_sniper_items;
             }
+            if (fresh.search_custom_ranking !== undefined)
+                _cfg.search_custom_ranking = Array.isArray(fresh.search_custom_ranking) ? fresh.search_custom_ranking : [];
+            if (fresh.crime_custom_ranking !== undefined)
+                _cfg.crime_custom_ranking  = Array.isArray(fresh.crime_custom_ranking)  ? fresh.crime_custom_ranking  : [];
+            if (fresh.adv_response_mode !== undefined)
+                _cfg.adv_response_mode = fresh.adv_response_mode;
+            if (fresh.adv_custom_responses !== undefined && typeof fresh.adv_custom_responses === 'object')
+                _cfg.adv_custom_responses = fresh.adv_custom_responses;
         } catch (e) {
             log('error', `Config reload failed: ${e.message}`);
         }
@@ -319,6 +331,15 @@ const STEALTH_MODES = {
 
 // ── Limit Flags helpers ─────────────────────────────────────
 let _botPaused = false;  // set by cycleLoop when in downtime
+const PAUSED_FLAG = path.join(__dirname, `paused_${ACCOUNT_ID}.flag`);
+
+function setPaused(paused) {
+    _botPaused = paused;
+    try {
+        if (paused) fs.writeFileSync(PAUSED_FLAG, '1');
+        else        fs.unlinkSync(PAUSED_FLAG);
+    } catch {}
+}
 
 function _stealthMode() {
     return STEALTH_MODES[_cfg.stealth_mode] ?? STEALTH_MODES.moderate;
@@ -422,7 +443,9 @@ const SEARCH_RANKINGS_BY_MODE = {
 };
 
 function pickBestSearchButton(buttons) {
-    const rankings = SEARCH_RANKINGS_BY_MODE[_cfg.search_risk];
+    const rankings = (_cfg.search_risk === 'custom' && _cfg.search_custom_ranking.length)
+        ? _cfg.search_custom_ranking
+        : (SEARCH_RANKINGS_BY_MODE[_cfg.search_risk] ?? SEARCH_RANKINGS_MEDIUM);
     let best = null, bestRank = rankings.length;
     for (const btn of buttons) {
         const label = (btn.label || '').trim();
@@ -466,7 +489,9 @@ const CRIME_RANKINGS_BY_MODE = {
 };
 
 function pickBestCrimeButton(buttons) {
-    const rankings = CRIME_RANKINGS_BY_MODE[_cfg.crime_risk];
+    const rankings = (_cfg.crime_risk === 'custom' && _cfg.crime_custom_ranking.length)
+        ? _cfg.crime_custom_ranking
+        : (CRIME_RANKINGS_BY_MODE[_cfg.crime_risk] ?? CRIME_RANKINGS_MEDIUM);
     let best = null, bestRank = rankings.length;
     for (const btn of buttons) {
         const label = (btn.label || '').trim();
@@ -638,11 +663,19 @@ function pickAdventureChoice(advType, embedDescription, buttons) {
         const matches = rule.keywords.every(kw => desc.includes(kw.toLowerCase()));
         if (!matches) continue;
 
-        if (!rule.best) return buttons[0];
-        const found = buttons.find(b => (b.label || '').trim().toLowerCase() === rule.best.toLowerCase());
+        // In custom mode, check for a user-defined response override using the first keyword as ID
+        let best = rule.best;
+        if (_cfg.adv_response_mode === 'custom') {
+            const customForAdv = (_cfg.adv_custom_responses || {})[advType] || {};
+            const customChoice = customForAdv[rule.keywords[0]];
+            if (customChoice) best = customChoice;
+        }
+
+        if (!best) return buttons[0];
+        const found = buttons.find(b => (b.label || '').trim().toLowerCase() === best.toLowerCase());
         if (found) return found;
         // Fallback: partial match
-        const partial = buttons.find(b => (b.label || '').trim().toLowerCase().includes(rule.best.toLowerCase()));
+        const partial = buttons.find(b => (b.label || '').trim().toLowerCase().includes(best.toLowerCase()));
         if (partial) return partial;
         break;
     }
@@ -691,6 +724,9 @@ async function resolveChannel(client, channelId) {
         throw new Error(`Channel/thread ${channelId} not found in any of ${guilds.length} guild(s). Original error: ${e.message}`);
     }
 }
+
+// Clear any stale paused flag from a previous crashed session
+try { fs.unlinkSync(PAUSED_FLAG); } catch {}
 
 // ── Command loops ──────────────────────────────────────────
 client.on('ready', async () => {
@@ -861,6 +897,38 @@ client.on('ready', async () => {
         });
     }
 
+    // Wait for a bot message in the channel that contains an Offer ID
+    function waitForMarketOfferMessage(timeout = 15000) {
+        return new Promise((resolve, reject) => {
+            let done = false;
+            const t = setTimeout(() => {
+                if (done) return;
+                done = true;
+                client.removeListener('raw', handler);
+                reject(new Error('Timeout waiting for market offer ID message'));
+            }, timeout);
+            function handler(packet) {
+                if (packet.t !== 'MESSAGE_CREATE') return;
+                if (String(packet.d.channel_id) !== String(CHANNEL_ID)) return;
+                if (String(packet.d.author?.id) !== String(BOT_ID)) return;
+                // Only resolve if this looks like an offer ID confirmation
+                if (!/offer\s+id/i.test(JSON.stringify(packet.d))) return;
+                if (done) return;
+                done = true;
+                clearTimeout(t);
+                client.removeListener('raw', handler);
+                resolve(packet.d);
+            }
+            client.on('raw', handler);
+        });
+    }
+
+    // Extract offer ID from "Offer ID: **<id>**." — strips trailing period
+    function parseMarketOfferId(text) {
+        const m = text.match(/[Oo]ffer\s+ID[:\s*]+\*\*([^*.]+)\*\*/);
+        return m ? m[1].trim() : null;
+    }
+
     async function confirmIfNeeded(msg, label) {
         if (!msg) return;
         const btn = findConfirmButton(msg.components || []);
@@ -901,6 +969,98 @@ client.on('ready', async () => {
         return items;
     }
 
+    // ── Market-post transfer (support vessel side) ───────────
+    async function transferItemsViaMarket(mothership_name) {
+        let iterations = 0;
+        while (iterations < 15) {
+            iterations++;
+            writeTransferStatus('Checking inventory...');
+            const invMsg = await sendAndWait(channel, 'pls inv', 15);
+            if (!invMsg) { writeTransferStatus('No inventory response', true); return; }
+
+            const items = parseInventoryItems(invMsg);
+            if (items.length === 0) {
+                writeTransferStatus('All transferable items posted to market!', true);
+                return;
+            }
+
+            for (const item of items) {
+                writeTransferStatus(`Posting ${item.qty}x ${item.name} to private market...`);
+
+                // Step 1: post the private market listing
+                const cmd = `pls market post for_coins sell ${item.qty} ${item.name} 1 1 false true`;
+                const postMsg = await sendAndWait(channel, cmd, 15);
+                if (!postMsg) {
+                    log('warn', `[TRANSFER] No response to market post for ${item.name}`);
+                    await sleep(2000); continue;
+                }
+
+                // Step 2: find Confirm button — register listener BEFORE click to avoid race
+                const confirmBtn = findButtonDeep(postMsg.components, 'Confirm')
+                                || findConfirmButton(postMsg.components || []);
+                if (!confirmBtn) {
+                    log('warn', `[TRANSFER] No Confirm button for market post of ${item.name}`);
+                    await sleep(2000); continue;
+                }
+
+                const offerMsgPromise = waitForMarketOfferMessage(15000);
+                try {
+                    await postMsg.clickButton(confirmBtn.customId || confirmBtn.custom_id);
+                    log('info', `[TRANSFER] Clicked Confirm for ${item.qty}x ${item.name}`);
+                } catch (e) {
+                    log('warn', `[TRANSFER] Confirm click failed for ${item.name}: ${e.message}`);
+                    await sleep(2000); continue;
+                }
+
+                // Step 3: wait for the offer ID message
+                let offerRaw;
+                try { offerRaw = await offerMsgPromise; } catch {
+                    log('warn', `[TRANSFER] No offer ID message received for ${item.name}`);
+                    await sleep(2000); continue;
+                }
+
+                // Step 4: parse offer ID
+                const rawText = [
+                    offerRaw.content || '',
+                    ...extractAllText(offerRaw.components || []),
+                    ...(offerRaw.embeds || []).map(e =>
+                        (e.description || '') + ' ' + (e.fields || []).map(f => f.value).join(' ')),
+                ].join(' ');
+
+                const offerId = parseMarketOfferId(rawText);
+                if (!offerId) {
+                    log('warn', `[TRANSFER] Could not parse offer ID from: ${rawText.slice(0, 300)}`);
+                    await sleep(2000); continue;
+                }
+
+                log('info', `[TRANSFER] Offer ID for ${item.name}: ${offerId}`);
+                writeTransferStatus(`Posted ${item.qty}x ${item.name} (ID: ${offerId}) — waiting for ${mothership_name}...`);
+
+                // Step 5: write pending file for the mothership to pick up
+                const pendingPath = path.join(__dirname, `market_pending_${ACCOUNT_ID}.json`);
+                fs.writeFileSync(pendingPath, JSON.stringify({
+                    offer_id: offerId, item: item.name, qty: item.qty, ts: Date.now(),
+                }));
+
+                // Step 6: wait up to 45s for mothership to accept (it deletes the file)
+                const deadline = Date.now() + 45000;
+                while (Date.now() < deadline && fs.existsSync(pendingPath)) {
+                    await sleep(2000);
+                }
+                if (fs.existsSync(pendingPath)) {
+                    log('warn', `[TRANSFER] Mothership did not accept ${item.name} within 45s — continuing`);
+                    try { fs.unlinkSync(pendingPath); } catch {}
+                } else {
+                    log('info', `[TRANSFER] Mothership accepted ${item.name}`);
+                }
+
+                await sleep(1500);
+            }
+            await sleep(400);
+        }
+        writeTransferStatus('Market item transfer complete.', true);
+    }
+
     async function transferLoop() {
         while (true) {
             await sleep(2000);
@@ -916,63 +1076,250 @@ client.on('ready', async () => {
             const { type, mothership_uid, mothership_name } = trigger;
 
             if (type === 'items') {
-                await runWithLock(async () => {
-                    let iterations = 0;
-                    while (iterations < 15) {
-                        iterations++;
-                        writeTransferStatus('Checking inventory...');
-                        const invMsg = await sendAndWait(channel, 'pls inv', 15);
-                        if (!invMsg) { writeTransferStatus('No inventory response', true); break; }
+                try {
+                    await runWithLock(async () => {
+                        let iterations = 0;
+                        let finished = false;
+                        while (iterations < 15) {
+                            iterations++;
+                            writeTransferStatus('Checking inventory...');
+                            const invMsg = await sendAndWait(channel, 'pls inv', 15);
+                            if (!invMsg) { writeTransferStatus('No inventory response', true); finished = true; break; }
 
-                        const items = parseInventoryItems(invMsg);
-                        if (items.length === 0) {
-                            writeTransferStatus('All transferable items sent to mothership!', true);
-                            break;
-                        }
+                            const items = parseInventoryItems(invMsg);
+                            if (items.length === 0) {
+                                writeTransferStatus('All transferable items sent to mothership!', true);
+                                finished = true;
+                                break;
+                            }
 
-                        for (const item of items) {
-                            writeTransferStatus(`Sending ${item.qty}x ${item.name} to ${mothership_name}...`);
-                            const shareMsg = await sendAndWait(channel, `pls friends share items <@${mothership_uid}> ${item.qty} ${item.name}`, 12);
-                            await confirmIfNeeded(shareMsg, `${item.qty}x ${item.name}`);
-                            await sleep(600);
+                            for (const item of items) {
+                                writeTransferStatus(`Sending ${item.qty}x ${item.name} to ${mothership_name}...`);
+                                const shareMsg = await sendAndWait(channel, `pls friends share items <@${mothership_uid}> ${item.qty} ${item.name}`, 12);
+                                await confirmIfNeeded(shareMsg, `${item.qty}x ${item.name}`);
+                                await sleep(600);
+                            }
+                            await sleep(400);
                         }
-                        await sleep(400);
-                    }
-                });
+                        if (!finished) writeTransferStatus('Item transfer complete.', true);
+                    });
+                } catch (e) {
+                    writeTransferStatus(`Transfer error: ${e.message}`, true);
+                }
+            } else if (type === 'market_items') {
+                try {
+                    await runWithLock(() => transferItemsViaMarket(mothership_name));
+                } catch (e) {
+                    writeTransferStatus(`Transfer error: ${e.message}`, true);
+                }
+            } else if (type === 'market_coins') {
+                try {
+                    await runWithLock(() => transferCoinsViaMarket(mothership_name));
+                } catch (e) {
+                    writeTransferStatus(`Transfer error: ${e.message}`, true);
+                }
             } else if (type === 'coins') {
-                await runWithLock(async () => {
-                    writeTransferStatus('Checking wallet balance...');
-                    const balMsg = await sendAndWait(channel, 'pls bal', 15);
-                    if (!balMsg) { writeTransferStatus('No balance response', true); return; }
+                try {
+                    await runWithLock(async () => {
+                        writeTransferStatus('Checking wallet balance...');
+                        const balMsg = await sendAndWait(channel, 'pls bal', 15);
+                        if (!balMsg) { writeTransferStatus('No balance response', true); return; }
 
-                    const chunks = extractAllText(balMsg.components || []);
-                    for (const embed of (balMsg.embeds || [])) {
-                        chunks.push(embed.description || '');
-                        for (const f of (embed.fields || [])) chunks.push(f.value || '');
-                    }
-                    if (balMsg.content) chunks.push(balMsg.content);
+                        const chunks = extractAllText(balMsg.components || []);
+                        for (const embed of (balMsg.embeds || [])) {
+                            chunks.push(embed.description || '');
+                            for (const f of (embed.fields || [])) chunks.push(f.value || '');
+                        }
+                        if (balMsg.content) chunks.push(balMsg.content);
 
-                    let wallet = 0;
-                    for (const chunk of chunks) {
-                        for (const line of chunk.split('\n')) {
-                            const m = line.match(/(?:<:\w+:\d+>|⏣)\s*([\d,]+)/);
-                            if (m && !line.includes('/') && wallet === 0) {
-                                wallet = parseInt(m[1].replace(/,/g, ''), 10);
+                        let wallet = 0;
+                        for (const chunk of chunks) {
+                            for (const line of chunk.split('\n')) {
+                                const m = line.match(/(?:<:\w+:\d+>|⏣)\s*([\d,]+)/);
+                                if (m && !line.includes('/') && wallet === 0) {
+                                    wallet = parseInt(m[1].replace(/,/g, ''), 10);
+                                }
                             }
                         }
-                    }
 
-                    if (wallet <= 0) {
-                        writeTransferStatus('No coins in wallet to transfer', true);
-                        return;
-                    }
+                        if (wallet <= 0) {
+                            writeTransferStatus('No coins in wallet to transfer', true);
+                            return;
+                        }
 
-                    writeTransferStatus(`Sending ⏣${wallet.toLocaleString()} to ${mothership_name}...`);
-                    const coinMsg = await sendAndWait(channel, `pls friends share coins <@${mothership_uid}> ${wallet}`, 12);
-                    await confirmIfNeeded(coinMsg, `⏣${wallet.toLocaleString()} coins`);
-                    await sleep(400);
-                    writeTransferStatus(`Done! Sent ⏣${wallet.toLocaleString()} to ${mothership_name}`, true);
-                });
+                        writeTransferStatus(`Sending ⏣${wallet.toLocaleString()} to ${mothership_name}...`);
+                        const coinMsg = await sendAndWait(channel, `pls friends share coins <@${mothership_uid}> ${wallet}`, 12);
+                        await confirmIfNeeded(coinMsg, `⏣${wallet.toLocaleString()} coins`);
+                        await sleep(400);
+                        writeTransferStatus(`Done! Sent ⏣${wallet.toLocaleString()} to ${mothership_name}`, true);
+                    });
+                } catch (e) {
+                    writeTransferStatus(`Transfer error: ${e.message}`, true);
+                }
+            }
+        }
+    }
+
+    // ── Market-post transfer (support vessel, coins side) ───────────────────
+    async function transferCoinsViaMarket(mothership_name) {
+        writeTransferStatus('Checking wallet balance...');
+        const balMsg = await sendAndWait(channel, 'pls bal', 15);
+        if (!balMsg) { writeTransferStatus('No balance response', true); return; }
+
+        const chunks = extractAllText(balMsg.components || []);
+        for (const embed of (balMsg.embeds || [])) {
+            chunks.push(embed.description || '');
+            for (const f of (embed.fields || [])) chunks.push(f.value || '');
+        }
+        if (balMsg.content) chunks.push(balMsg.content);
+
+        let wallet = 0;
+        for (const chunk of chunks) {
+            for (const line of chunk.split('\n')) {
+                const m = line.match(/(?:<:\w+:\d+>|⏣)\s*([\d,]+)/);
+                if (m && !line.includes('/') && wallet === 0) {
+                    wallet = parseInt(m[1].replace(/,/g, ''), 10);
+                }
+            }
+        }
+
+        if (wallet <= 0) {
+            writeTransferStatus('No coins in wallet to transfer via market', true);
+            return;
+        }
+
+        const tax        = Math.floor(wallet * 0.005);
+        const toSend     = wallet - tax;
+
+        writeTransferStatus(`Posting market buy order for ⏣${toSend.toLocaleString()} (wallet ⏣${wallet.toLocaleString()}, tax ⏣${tax.toLocaleString()})...`);
+
+        const cmd = `pls market post for_coins buy 1 ant ${toSend} 1 false true`;
+        const postMsg = await sendAndWait(channel, cmd, 15);
+        if (!postMsg) {
+            writeTransferStatus('No response to market post for coins', true);
+            return;
+        }
+
+        const confirmBtn = findButtonDeep(postMsg.components, 'Confirm')
+                        || findConfirmButton(postMsg.components || []);
+        if (!confirmBtn) {
+            writeTransferStatus('No Confirm button for coins market post', true);
+            return;
+        }
+
+        const offerMsgPromise = waitForMarketOfferMessage(15000);
+        try {
+            await postMsg.clickButton(confirmBtn.customId || confirmBtn.custom_id);
+            log('info', `[TRANSFER] Clicked Confirm for coins market post (⏣${toSend.toLocaleString()})`);
+        } catch (e) {
+            writeTransferStatus(`Confirm click failed for coins post: ${e.message}`, true);
+            return;
+        }
+
+        let offerRaw;
+        try { offerRaw = await offerMsgPromise; } catch {
+            writeTransferStatus('No offer ID message received for coins market post', true);
+            return;
+        }
+
+        const rawText = [
+            offerRaw.content || '',
+            ...extractAllText(offerRaw.components || []),
+            ...(offerRaw.embeds || []).map(e =>
+                (e.description || '') + ' ' + (e.fields || []).map(f => f.value).join(' ')),
+        ].join(' ');
+
+        const offerId = parseMarketOfferId(rawText);
+        if (!offerId) {
+            log('warn', `[TRANSFER] Could not parse offer ID from coins post: ${rawText.slice(0, 300)}`);
+            writeTransferStatus('Could not parse offer ID for coins market post', true);
+            return;
+        }
+
+        log('info', `[TRANSFER] Coins market offer ID: ${offerId}`);
+        writeTransferStatus(`Posted coins offer (ID: ${offerId}) — waiting for ${mothership_name}...`);
+
+        const pendingPath = path.join(__dirname, `market_pending_coins_${ACCOUNT_ID}.json`);
+        fs.writeFileSync(pendingPath, JSON.stringify({
+            offer_id: offerId, item: 'coins', qty: toSend, ts: Date.now(),
+        }));
+
+        const deadline = Date.now() + 45000;
+        while (Date.now() < deadline && fs.existsSync(pendingPath)) {
+            await sleep(2000);
+        }
+        if (fs.existsSync(pendingPath)) {
+            log('warn', `[TRANSFER] Mothership did not accept coins offer within 45s`);
+            try { fs.unlinkSync(pendingPath); } catch {}
+        } else {
+            writeTransferStatus(`Done! Mothership accepted coins offer (ID: ${offerId})`, true);
+            log('info', `[TRANSFER] Mothership accepted coins market offer ${offerId}`);
+        }
+    }
+
+    // ── Mothership market acceptance loop ────────────────────
+    // Polls for market_pending_<vessel_id>.json files written by support vessels,
+    // accepts the offer, confirms, then deletes the file to unblock the vessel.
+    async function mothershipMarketLoop() {
+        await sleep(8000);
+        while (true) {
+            await sleep(2000);
+
+            // Only the mothership account runs this
+            let rawCfg;
+            try { rawCfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch { continue; }
+            if (rawCfg.mothership_id !== ACCOUNT_ID) continue;
+
+            // Find pending offer files from any support vessel
+            let pendingFiles;
+            try {
+                pendingFiles = fs.readdirSync(__dirname)
+                    .filter(f => f.startsWith('market_pending_') && f.endsWith('.json'));
+            } catch { continue; }
+
+            if (pendingFiles.length === 0) continue;
+
+            for (const filename of pendingFiles) {
+                const pendingPath = path.join(__dirname, filename);
+                let pending;
+                try { pending = JSON.parse(fs.readFileSync(pendingPath, 'utf8')); } catch { continue; }
+
+                const { offer_id, item, qty } = pending;
+                log('info', `[MOTHERSHIP] Waiting 30s before accepting offer ${offer_id} for ${qty}x ${item}...`);
+
+                // Buffer: Dank Memer shows "You cannot accept this offer just yet" if accepted too quickly
+                await sleep(30000);
+
+                log('info', `[MOTHERSHIP] Accepting market offer ${offer_id} for ${qty}x ${item}`);
+
+                // Accept the offer
+                const acceptMsg = await sendAndWait(channel, `pls market accept ${offer_id}`, 15);
+                if (!acceptMsg) {
+                    log('warn', `[MOTHERSHIP] No response to market accept ${offer_id}`);
+                    continue;
+                }
+
+                // Click Confirm (Components V2 aware)
+                const confirmBtn = findButtonDeep(acceptMsg.components, 'Confirm')
+                                || findConfirmButton(acceptMsg.components || []);
+                if (confirmBtn) {
+                    try {
+                        await acceptMsg.clickButton(confirmBtn.customId || confirmBtn.custom_id);
+                        log('info', `[MOTHERSHIP] Confirmed accept of offer ${offer_id}`);
+                    } catch (e) {
+                        log('warn', `[MOTHERSHIP] Confirm click failed for ${offer_id}: ${e.message}`);
+                    }
+                } else {
+                    log('warn', `[MOTHERSHIP] No Confirm button for market accept ${offer_id}`);
+                }
+
+                await sleep(1500);
+
+                // Delete the pending file — this signals the support vessel to continue
+                try { fs.unlinkSync(pendingPath); } catch {}
+                log('info', `[MOTHERSHIP] Cleared pending offer ${offer_id}`);
+
+                await sleep(1000);
             }
         }
     }
@@ -994,195 +1341,179 @@ client.on('ready', async () => {
             await sleep(5000);
             const up   = _cfg.cycle_uptime_mins;
             const down = _cfg.cycle_downtime_mins;
-            if (!_cfg.limit_flags || !up || !down) { _botPaused = false; continue; }
+            if (!_cfg.limit_flags || !up || !down) { setPaused(false); continue; }
 
-            _botPaused = false;
+            setPaused(false);
             log('info', `[CYCLE] Uptime started — active for ${up}min`);
             await sleep(up * 60000);
 
             // re-check in case config changed mid-sleep
             if (!_cfg.limit_flags || !_cfg.cycle_uptime_mins || !_cfg.cycle_downtime_mins) continue;
 
-            _botPaused = true;
+            setPaused(true);
             log('info', `[CYCLE] Downtime started — resting for ${down}min`);
             await sleep(down * 60000);
         }
     }
 
-    async function begLoop() {
+    // ── Interaction queue ───────────────────────────────────────
+    // commandLoop pushes async handler functions here; interactionLoop drains them.
+    const _interactionQueue = [];
+
+    async function interactionLoop() {
         while (true) {
-            if (_botPaused) { await sleep(5000); continue; }
-            if (_cfg.commands_enabled.beg) {
-                await runWithLock(async () => {
-                    await sendAndWait(channel, 'pls beg');
-                });
-            }
-            const _begSleep = _cfg.limit_flags ? humanJitter(_cfg.beg_cooldown * 1000) : _cfg.beg_cooldown * 1000;
-            await sleep(_begSleep);
-            await stealthExtraSleep();
+            if (!_interactionQueue.length) { await sleep(50); continue; }
+            const task = _interactionQueue.shift();
+            try { await task(); } catch (e) { log('warn', `[INTERACT] Error: ${e.message}`); }
         }
     }
 
-    async function searchLoop() {
-        await sleep(3000);
-        while (true) {
-            if (_botPaused) { await sleep(5000); continue; }
-            if (_cfg.commands_enabled.search) {
-                await runWithLock(async () => {
-                    const res = await sendAndWait(channel, 'pls search');
-                    if (res) {
-                        const btns   = getButtons(res);
-                        const target = btns.length ? (pickBestSearchButton(btns) || btns[0]) : null;
-                        if (target) {
-                            log('info', `[SEARCH] Clicking '${target.label}'`);
-                            try { await res.clickButton(target.customId); log('info', `[SEARCH] ✓ Clicked '${target.label}'`); }
-                            catch (e) { log('warn', `[SEARCH] ${e.message}`); }
-                        }
-                    }
-                });
-            }
-            const _searchSleep = _cfg.limit_flags ? humanJitter(_cfg.search_cooldown * 1000) : _cfg.search_cooldown * 1000;
-            await sleep(_searchSleep);
-            await stealthExtraSleep();
-        }
-    }
-
-    async function crimeLoop() {
-        await sleep(12000);
-        while (true) {
-            if (_botPaused) { await sleep(5000); continue; }
-            if (_cfg.commands_enabled.crime) {
-                await runWithLock(async () => {
-                    const res = await sendAndWait(channel, 'pls crime');
-                    if (res) {
-                        const btns   = getButtons(res);
-                        const target = btns.length ? (pickBestCrimeButton(btns) || btns[0]) : null;
-                        if (target) {
-                            log('info', `[CRIME] Clicking '${target.label}'`);
-                            try { await res.clickButton(target.customId); log('info', `[CRIME] ✓ Clicked '${target.label}'`); }
-                            catch (e) { log('warn', `[CRIME] ${e.message}`); }
-                        }
-                    }
-                });
-            }
-            const _crimeSleep = _cfg.limit_flags ? humanJitter(_cfg.crime_cooldown * 1000) : _cfg.crime_cooldown * 1000;
-            await sleep(_crimeSleep);
-            await stealthExtraSleep();
-        }
-    }
-
-    async function digLoop() {
-        await sleep(6000);
-        while (true) {
-            if (_botPaused) { await sleep(5000); continue; }
-            if (_cfg.commands_enabled.dig) {
-                await runWithLock(async () => {
-                    const res = await sendAndWait(channel, 'pls dig');
-                    if (res) {
-                        const desc = res.embeds[0]?.description || '';
-                        if (desc.includes('Dodge the Moleman'))     await handleDodge(res, 'Worm',    'MOLEMAN');
-                        else if (desc.includes('Dodge the Sludge')) await handleDodge(res, 'PinkBits','SLUDGE');
-                    }
-                });
-            }
-            const _digSleep = _cfg.limit_flags ? humanJitter(_cfg.cooldown * 1000) : _cfg.cooldown * 1000;
-            await sleep(_digSleep);
-            await stealthExtraSleep();
-        }
-    }
-
-    async function huntLoop() {
-        await sleep(9000);
-        while (true) {
-            if (_botPaused) { await sleep(5000); continue; }
-            if (_cfg.commands_enabled.hunt) {
-                await runWithLock(async () => {
-                    const res = await sendAndWait(channel, 'pls hunt');
-                    if (res) {
-                        const desc = res.embeds[0]?.description || '';
-                        if (desc.includes('Dodge the Dragon')) await handleDodge(res, 'FireBall','FIREBALL');
-                    }
-                });
-            }
-            const _huntSleep = _cfg.limit_flags ? humanJitter(_cfg.cooldown * 1000) : _cfg.cooldown * 1000;
-            await sleep(_huntSleep);
-            await stealthExtraSleep();
-        }
-    }
-
-    async function hlLoop() {
-        await sleep(15000);
-        while (true) {
-            if (_botPaused) { await sleep(5000); continue; }
-            if (_cfg.commands_enabled.hl) {
-                await runWithLock(async () => {
-                    const res = await sendAndWait(channel, 'pls hl', _cfg.hl_wait_for);
-                    if (res) {
-                        const desc  = res.embeds[0]?.description || '';
-                        const match = desc.match(/\*\*(\d+)\*\*/);
-                        if (match) {
-                            const n = parseInt(match[1]);
-                            const choice = n <= 50 ? 'Higher' : 'Lower';
-                            log('info', `[HL] Number is ${n} → clicking '${choice}'`);
-                            const ok = await clickButton(res, choice);
-                            log(ok ? 'info' : 'warn', ok ? `[HL] ✓ Clicked '${choice}'` : `[HL] ✗ Failed`);
-                        } else {
-                            log('warn', '[HL] Could not parse number');
-                        }
-                    }
-                });
-            }
-            const _hlSleep = _cfg.limit_flags ? humanJitter(_cfg.hl_cooldown * 1000) : _cfg.hl_cooldown * 1000;
-            await sleep(_hlSleep);
-            await stealthExtraSleep();
-        }
-    }
-
-    async function pmLoop() {
-        await sleep(18000);
+    // ── Unified command send loop ────────────────────────────────
+    // Tracks per-command next-send timestamps and fires whichever command
+    // is due soonest.  Interaction side-effects are pushed to _interactionQueue
+    // so they never block the next send.
+    async function commandLoop() {
         const PM_PLATFORMS = ['TikTok', 'Discord', 'Reddit', 'Twitter', 'Facebook'];
-        while (true) {
-            if (_botPaused) { await sleep(5000); continue; }
-            let pmCooldown = _cfg.pm_cooldown;
-            if (_cfg.commands_enabled.pm) {
-                const platform = PM_PLATFORMS[Math.floor(Math.random() * PM_PLATFORMS.length)];
-                await runWithLock(async () => {
-                    const res = await sendAndWait(channel, 'pls pm');
-                    if (res) {
-                        const menuRows = getMenuRows(res);
-                        log('info', `[PM] Found ${menuRows.length} menu(s), platform='${platform}'`);
-                        if (menuRows.length > 0) {
-                            const platformRow = menuRows.find(({ menu }) =>
-                                (menu.options || []).some(o =>
-                                    PM_PLATFORMS.map(p => p.toLowerCase()).includes((o.label || '').toLowerCase())
-                                )
-                            ) || menuRows[menuRows.length - 1];
-                            const { rowIndex, menu } = platformRow;
-                            const matchedOpt = (menu.options || []).find(
-                                o => (o.label || '').trim().toLowerCase() === platform.toLowerCase()
-                            );
-                            const val = matchedOpt?.value || (menu.options?.length > 0 ? menu.options[0].value : null);
-                            if (val) {
-                                try {
-                                    await res.selectMenu(rowIndex, [val]);
-                                    log('info', `[PM] ✓ Selected '${matchedOpt?.label || val}'`);
-                                } catch (e) { log('warn', `[PM] select failed: ${e.message}`); }
-                            }
-                        }
-                        const posted = await clickButton(res, 'Post');
-                        log(posted ? 'info' : 'warn', posted ? "[PM] ✓ Clicked 'Post'" : "[PM] ✗ 'Post' not found");
-                        await sleep(3000);
-                        try {
-                            const updated = await channel.messages.fetch(res.id);
-                            if ((updated.embeds[0]?.description || '').includes('another 2 minutes')) {
-                                log('warn', '[PM] Rate-limited — waiting 120s');
-                                pmCooldown = 120;
-                            }
-                        } catch (e) { log('warn', `[PM] Cooldown check failed: ${e.message}`); }
-                    }
-                });
+
+        const CMD_STR = {
+            hunt: 'pls hunt', dig: 'pls dig', search: 'pls search',
+            beg: 'pls beg', crime: 'pls crime', hl: 'pls hl', pm: 'pls pm',
+        };
+
+        // Evaluate each command's cooldown at send time so hot-reloaded values apply
+        function getCooldownMs(cmd) {
+            switch (cmd) {
+                case 'hunt':   return _cfg.limit_flags ? humanJitter(_cfg.cooldown * 1000)        : _cfg.cooldown * 1000;
+                case 'dig':    return _cfg.limit_flags ? humanJitter(_cfg.cooldown * 1000)        : _cfg.cooldown * 1000;
+                case 'search': return _cfg.limit_flags ? humanJitter(_cfg.search_cooldown * 1000) : _cfg.search_cooldown * 1000;
+                case 'beg':    return _cfg.limit_flags ? humanJitter(_cfg.beg_cooldown * 1000)    : _cfg.beg_cooldown * 1000;
+                case 'crime':  return _cfg.limit_flags ? humanJitter(_cfg.crime_cooldown * 1000)  : _cfg.crime_cooldown * 1000;
+                case 'hl':     return _cfg.limit_flags ? humanJitter(_cfg.hl_cooldown * 1000)     : _cfg.hl_cooldown * 1000;
+                case 'pm':     return _cfg.pm_cooldown * 1000;
+                default:       return 20000;
             }
-            await sleep(pmCooldown * 1000);
+        }
+
+        // Staggered initial send times (ms from now) — matches original per-loop sleeps
+        const nextSend = {
+            beg:    Date.now(),
+            search: Date.now() + 3000,
+            dig:    Date.now() + 6000,
+            hunt:   Date.now() + 9000,
+            crime:  Date.now() + 12000,
+            hl:     Date.now() + 15000,
+            pm:     Date.now() + 18000,
+        };
+
+        while (true) {
+            if (_botPaused) { await sleep(1000); continue; }
+
+            const now = Date.now();
+
+            // Find the enabled command due soonest
+            let soonest = null;
+            let soonestTime = Infinity;
+            for (const [cmd, t] of Object.entries(nextSend)) {
+                if (_cfg.commands_enabled[cmd] && t < soonestTime) {
+                    soonestTime = t;
+                    soonest = cmd;
+                }
+            }
+
+            if (!soonest) { await sleep(500); continue; }
+
+            // Sleep until it's due (poll in ≤500 ms slices so pause/enable changes apply promptly)
+            const wait = soonestTime - now;
+            if (wait > 50) { await sleep(Math.min(wait, 500)); continue; }
+
+            // Send the command
+            const waitFor = soonest === 'hl' ? _cfg.hl_wait_for : null;
+            const res = await sendAndWait(channel, CMD_STR[soonest], waitFor);
+
+            // Schedule next send immediately after receiving response (or timing out)
+            nextSend[soonest] = Date.now() + getCooldownMs(soonest);
+
+            if (!res) continue;
+
+            // Capture loop-variable before pushing closure
+            const cmd = soonest;
+            const msg = res;
+
+            _interactionQueue.push(async () => {
+                if (cmd === 'hunt') {
+                    const desc = msg.embeds[0]?.description || '';
+                    if (desc.includes('Dodge the Dragon')) await handleDodge(msg, 'FireBall', 'FIREBALL');
+
+                } else if (cmd === 'dig') {
+                    const desc = msg.embeds[0]?.description || '';
+                    if (desc.includes('Dodge the Moleman'))     await handleDodge(msg, 'Worm',     'MOLEMAN');
+                    else if (desc.includes('Dodge the Sludge')) await handleDodge(msg, 'PinkBits', 'SLUDGE');
+
+                } else if (cmd === 'search') {
+                    const btns   = getButtons(msg);
+                    const target = btns.length ? (pickBestSearchButton(btns) || btns[0]) : null;
+                    if (target) {
+                        log('info', `[SEARCH] Clicking '${target.label}'`);
+                        try { await msg.clickButton(target.customId); log('info', `[SEARCH] ✓ Clicked '${target.label}'`); }
+                        catch (e) { log('warn', `[SEARCH] ${e.message}`); }
+                    }
+
+                } else if (cmd === 'crime') {
+                    const btns   = getButtons(msg);
+                    const target = btns.length ? (pickBestCrimeButton(btns) || btns[0]) : null;
+                    if (target) {
+                        log('info', `[CRIME] Clicking '${target.label}'`);
+                        try { await msg.clickButton(target.customId); log('info', `[CRIME] ✓ Clicked '${target.label}'`); }
+                        catch (e) { log('warn', `[CRIME] ${e.message}`); }
+                    }
+
+                } else if (cmd === 'hl') {
+                    const desc  = msg.embeds[0]?.description || '';
+                    const match = desc.match(/\*\*(\d+)\*\*/);
+                    if (match) {
+                        const n = parseInt(match[1]);
+                        const choice = n <= 50 ? 'Higher' : 'Lower';
+                        log('info', `[HL] Number is ${n} → clicking '${choice}'`);
+                        const ok = await clickButton(msg, choice);
+                        log(ok ? 'info' : 'warn', ok ? `[HL] ✓ Clicked '${choice}'` : `[HL] ✗ Failed`);
+                    } else {
+                        log('warn', '[HL] Could not parse number');
+                    }
+
+                } else if (cmd === 'pm') {
+                    const platform = PM_PLATFORMS[Math.floor(Math.random() * PM_PLATFORMS.length)];
+                    const menuRows = getMenuRows(msg);
+                    log('info', `[PM] Found ${menuRows.length} menu(s), platform='${platform}'`);
+                    if (menuRows.length > 0) {
+                        const platformRow = menuRows.find(({ menu }) =>
+                            (menu.options || []).some(o =>
+                                PM_PLATFORMS.map(p => p.toLowerCase()).includes((o.label || '').toLowerCase())
+                            )
+                        ) || menuRows[menuRows.length - 1];
+                        const { rowIndex, menu } = platformRow;
+                        const matchedOpt = (menu.options || []).find(
+                            o => (o.label || '').trim().toLowerCase() === platform.toLowerCase()
+                        );
+                        const val = matchedOpt?.value || (menu.options?.length > 0 ? menu.options[0].value : null);
+                        if (val) {
+                            try {
+                                await msg.selectMenu(rowIndex, [val]);
+                                log('info', `[PM] ✓ Selected '${matchedOpt?.label || val}'`);
+                            } catch (e) { log('warn', `[PM] select failed: ${e.message}`); }
+                        }
+                    }
+                    const posted = await clickButton(msg, 'Post');
+                    log(posted ? 'info' : 'warn', posted ? "[PM] ✓ Clicked 'Post'" : "[PM] ✗ 'Post' not found");
+                    await sleep(3000);
+                    try {
+                        const updated = await channel.messages.fetch(msg.id);
+                        if ((updated.embeds[0]?.description || '').includes('another 2 minutes')) {
+                            log('warn', '[PM] Rate-limited — overriding next send to +120s');
+                            nextSend.pm = Date.now() + 120000;
+                        }
+                    } catch (e) { log('warn', `[PM] Cooldown check failed: ${e.message}`); }
+                }
+            });
         }
     }
 
@@ -1976,10 +2307,10 @@ client.on('ready', async () => {
     Promise.all([
         configReloadLoop(), heartbeatLoop(),
         cycleLoop(),
-        huntLoop(), digLoop(),
-        searchLoop(), begLoop(), crimeLoop(), hlLoop(), pmLoop(), advLoop(),
+        commandLoop(), interactionLoop(),
+        advLoop(),
         fishLoop(), transferLoop(),
-        marketSniperLoop(),
+        marketSniperLoop(), mothershipMarketLoop(),
         studyMarketView(),
     ]).catch(e => log('error', `Fatal: ${e.message}`));
 });

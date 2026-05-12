@@ -9,6 +9,7 @@ const ACCOUNT_ID = accountArg ? accountArg.split('=')[1] : 'default';
 
 const CONFIG_PATH  = path.join(__dirname, 'config.json');
 const HISTORY_PATH = path.join(__dirname, `balance_${ACCOUNT_ID}.json`);
+const PAUSED_FLAG  = path.join(__dirname, `paused_${ACCOUNT_ID}.flag`);
 
 function loadAccountConfig() {
     const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
@@ -222,6 +223,10 @@ client.on('ready', async () => {
 
     async function checkBalance() {
         if (waitingForBal) return;
+        if (fs.existsSync(PAUSED_FLAG)) {
+            log('info', '[CYCLE] Bot is in downtime — skipping pls bal');
+            return;
+        }
         waitingForBal = true;
         await waitForMainLock();
         try {

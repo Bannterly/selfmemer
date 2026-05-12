@@ -17,7 +17,7 @@ NUMERIC_FIELDS = [
     "adv_cooldown",
 ]
 RISK_FIELDS  = ["search_risk", "crime_risk"]
-VALID_RISK   = {"low", "medium", "high"}
+VALID_RISK   = {"low", "medium", "high", "custom"}
 COMMAND_KEYS = ["hunt", "dig", "search", "beg", "crime", "hl", "pm", "adv", "fish"]
 
 VALID_ADV_TYPES = [
@@ -46,6 +46,8 @@ DEFAULT_ACCOUNT = {
     "stealth_mode":       "moderate",
     "cycle_uptime_mins":  0,
     "cycle_downtime_mins": 0,
+    "search_custom_ranking": [],
+    "crime_custom_ranking":  [],
 }
 
 # ── Config helpers ─────────────────────────────────────────
@@ -242,6 +244,10 @@ def update_account(account_id):
             account["cycle_uptime_mins"] = max(0, int(data["cycle_uptime_mins"]))
         if "cycle_downtime_mins" in data and isinstance(data["cycle_downtime_mins"], (int, float)):
             account["cycle_downtime_mins"] = max(0, int(data["cycle_downtime_mins"]))
+        if "search_custom_ranking" in data and isinstance(data["search_custom_ranking"], list):
+            account["search_custom_ranking"] = [str(x)[:120] for x in data["search_custom_ranking"][:300] if isinstance(x, str)]
+        if "crime_custom_ranking" in data and isinstance(data["crime_custom_ranking"], list):
+            account["crime_custom_ranking"] = [str(x)[:120] for x in data["crime_custom_ranking"][:100] if isinstance(x, str)]
         cfg["accounts"][i] = account
         break
     save_config(cfg)
@@ -465,7 +471,7 @@ def set_discord_uid(account_id):
 def trigger_transfer(account_id):
     data          = request.get_json(silent=True) or {}
     transfer_type = data.get("type")
-    if transfer_type not in ("items", "coins"):
+    if transfer_type not in ("items", "coins", "market_items", "market_coins"):
         return jsonify({"ok": False, "error": "Invalid type"}), 400
 
     cfg = load_config()
@@ -508,6 +514,32 @@ def get_transfer_status(account_id):
             return jsonify(json.load(f))
     except Exception:
         return jsonify({"status": None, "ts": None, "done": True})
+
+@app.route("/api/overview", methods=["GET"])
+def get_overview():
+    cfg  = load_config()
+    accs = cfg.get("accounts", [])
+    result = []
+    for acc in accs:
+        aid = acc["id"]
+        bal_path = os.path.join(BASE_DIR, f"balance_{aid}.json")
+        entry = {"wallet": None, "bank": None, "net_worth": None, "ts": None}
+        try:
+            with open(bal_path) as f:
+                data = json.load(f)
+            if isinstance(data, list) and data:
+                entry = data[-1]
+        except Exception:
+            pass
+        result.append({
+            "id":        aid,
+            "name":      acc.get("name", "Account"),
+            "wallet":    entry.get("wallet"),
+            "bank":      entry.get("bank"),
+            "net_worth": entry.get("netWorth") or entry.get("net_worth"),
+            "ts":        entry.get("ts"),
+        })
+    return jsonify(result)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
