@@ -1356,179 +1356,174 @@ client.on('ready', async () => {
         }
     }
 
-    // ── Interaction queue ───────────────────────────────────────
-    // commandLoop pushes async handler functions here; interactionLoop drains them.
-    const _interactionQueue = [];
-
-    async function interactionLoop() {
+    async function begLoop() {
         while (true) {
-            if (!_interactionQueue.length) { await sleep(50); continue; }
-            const task = _interactionQueue.shift();
-            try { await task(); } catch (e) { log('warn', `[INTERACT] Error: ${e.message}`); }
+            if (_botPaused) { await sleep(5000); continue; }
+            if (_cfg.commands_enabled.beg) {
+                await runWithLock(async () => {
+                    await sendAndWait(channel, 'pls beg');
+                });
+            }
+            const ms = _cfg.limit_flags ? humanJitter(_cfg.beg_cooldown * 1000) : _cfg.beg_cooldown * 1000;
+            await sleep(ms);
         }
     }
 
-    // ── Unified command send loop ────────────────────────────────
-    // Tracks per-command next-send timestamps and fires whichever command
-    // is due soonest.  Interaction side-effects are pushed to _interactionQueue
-    // so they never block the next send.
-    async function commandLoop() {
-        const PM_PLATFORMS = ['TikTok', 'Discord', 'Reddit', 'Twitter', 'Facebook'];
-
-        const CMD_STR = {
-            hunt: 'pls hunt', dig: 'pls dig', search: 'pls search',
-            beg: 'pls beg', crime: 'pls crime', hl: 'pls hl', pm: 'pls pm',
-        };
-
-        // Evaluate each command's cooldown at send time so hot-reloaded values apply
-        function getCooldownMs(cmd) {
-            switch (cmd) {
-                case 'hunt':   return _cfg.limit_flags ? humanJitter(_cfg.cooldown * 1000)        : _cfg.cooldown * 1000;
-                case 'dig':    return _cfg.limit_flags ? humanJitter(_cfg.cooldown * 1000)        : _cfg.cooldown * 1000;
-                case 'search': return _cfg.limit_flags ? humanJitter(_cfg.search_cooldown * 1000) : _cfg.search_cooldown * 1000;
-                case 'beg':    return _cfg.limit_flags ? humanJitter(_cfg.beg_cooldown * 1000)    : _cfg.beg_cooldown * 1000;
-                case 'crime':  return _cfg.limit_flags ? humanJitter(_cfg.crime_cooldown * 1000)  : _cfg.crime_cooldown * 1000;
-                case 'hl':     return _cfg.limit_flags ? humanJitter(_cfg.hl_cooldown * 1000)     : _cfg.hl_cooldown * 1000;
-                case 'pm':     return _cfg.pm_cooldown * 1000;
-                default:       return 20000;
-            }
-        }
-
-        // Staggered initial send times (ms from now) — matches original per-loop sleeps
-        const nextSend = {
-            beg:    Date.now(),
-            search: Date.now() + 3000,
-            dig:    Date.now() + 6000,
-            hunt:   Date.now() + 9000,
-            crime:  Date.now() + 12000,
-            hl:     Date.now() + 15000,
-            pm:     Date.now() + 18000,
-        };
-
+    async function searchLoop() {
+        await sleep(3000);
         while (true) {
-            if (_botPaused) { await sleep(1000); continue; }
-
-            const now = Date.now();
-
-            // Find the enabled command due soonest
-            let soonest = null;
-            let soonestTime = Infinity;
-            for (const [cmd, t] of Object.entries(nextSend)) {
-                if (_cfg.commands_enabled[cmd] && t < soonestTime) {
-                    soonestTime = t;
-                    soonest = cmd;
-                }
-            }
-
-            if (!soonest) { await sleep(500); continue; }
-
-            // Sleep until it's due (poll in ≤500 ms slices so pause/enable changes apply promptly)
-            const wait = soonestTime - now;
-            if (wait > 50) { await sleep(Math.min(wait, 500)); continue; }
-
-            // Send the command
-            const waitFor = soonest === 'hl' ? _cfg.hl_wait_for : null;
-            const res = await sendAndWait(channel, CMD_STR[soonest], waitFor);
-
-            // For commands that require a button click, cooldown starts AFTER the
-            // button is successfully clicked (set inside the queue below).
-            // For beg/hl/pm there is no mandatory interaction so cooldown starts now.
-            const DEFERRED_CD = new Set(['hunt', 'dig', 'search', 'crime']);
-            if (!DEFERRED_CD.has(soonest)) {
-                nextSend[soonest] = Date.now() + getCooldownMs(soonest);
-            } else {
-                nextSend[soonest] = Infinity; // will be set after button click
-            }
-
-            if (!res) {
-                // No response — apply cooldown immediately so the command isn't stuck
-                if (DEFERRED_CD.has(soonest)) nextSend[soonest] = Date.now() + getCooldownMs(soonest);
-                continue;
-            }
-
-            // Capture loop-variable before pushing closure
-            const cmd = soonest;
-            const msg = res;
-
-            _interactionQueue.push(async () => {
-                if (cmd === 'hunt') {
-                    const desc = msg.embeds[0]?.description || '';
-                    if (desc.includes('Dodge the Dragon')) await handleDodge(msg, 'FireBall', 'FIREBALL');
-                    nextSend[cmd] = Date.now() + getCooldownMs(cmd);
-
-                } else if (cmd === 'dig') {
-                    const desc = msg.embeds[0]?.description || '';
-                    if (desc.includes('Dodge the Moleman'))     await handleDodge(msg, 'Worm',     'MOLEMAN');
-                    else if (desc.includes('Dodge the Sludge')) await handleDodge(msg, 'PinkBits', 'SLUDGE');
-                    nextSend[cmd] = Date.now() + getCooldownMs(cmd);
-
-                } else if (cmd === 'search') {
-                    const btns   = getButtons(msg);
-                    const target = btns.length ? (pickBestSearchButton(btns) || btns[0]) : null;
-                    if (target) {
-                        log('info', `[SEARCH] Clicking '${target.label}'`);
-                        try { await msg.clickButton(target.customId); log('info', `[SEARCH] ✓ Clicked '${target.label}'`); }
-                        catch (e) { log('warn', `[SEARCH] ${e.message}`); }
-                    }
-                    nextSend[cmd] = Date.now() + getCooldownMs(cmd);
-
-                } else if (cmd === 'crime') {
-                    const btns   = getButtons(msg);
-                    const target = btns.length ? (pickBestCrimeButton(btns) || btns[0]) : null;
-                    if (target) {
-                        log('info', `[CRIME] Clicking '${target.label}'`);
-                        try { await msg.clickButton(target.customId); log('info', `[CRIME] ✓ Clicked '${target.label}'`); }
-                        catch (e) { log('warn', `[CRIME] ${e.message}`); }
-                    }
-                    nextSend[cmd] = Date.now() + getCooldownMs(cmd);
-
-                } else if (cmd === 'hl') {
-                    const desc  = msg.embeds[0]?.description || '';
-                    const match = desc.match(/\*\*(\d+)\*\*/);
-                    if (match) {
-                        const n = parseInt(match[1]);
-                        const choice = n <= 50 ? 'Higher' : 'Lower';
-                        log('info', `[HL] Number is ${n} → clicking '${choice}'`);
-                        const ok = await clickButton(msg, choice);
-                        log(ok ? 'info' : 'warn', ok ? `[HL] ✓ Clicked '${choice}'` : `[HL] ✗ Failed`);
-                    } else {
-                        log('warn', '[HL] Could not parse number');
-                    }
-
-                } else if (cmd === 'pm') {
-                    const platform = PM_PLATFORMS[Math.floor(Math.random() * PM_PLATFORMS.length)];
-                    const menuRows = getMenuRows(msg);
-                    log('info', `[PM] Found ${menuRows.length} menu(s), platform='${platform}'`);
-                    if (menuRows.length > 0) {
-                        const platformRow = menuRows.find(({ menu }) =>
-                            (menu.options || []).some(o =>
-                                PM_PLATFORMS.map(p => p.toLowerCase()).includes((o.label || '').toLowerCase())
-                            )
-                        ) || menuRows[menuRows.length - 1];
-                        const { rowIndex, menu } = platformRow;
-                        const matchedOpt = (menu.options || []).find(
-                            o => (o.label || '').trim().toLowerCase() === platform.toLowerCase()
-                        );
-                        const val = matchedOpt?.value || (menu.options?.length > 0 ? menu.options[0].value : null);
-                        if (val) {
-                            try {
-                                await msg.selectMenu(rowIndex, [val]);
-                                log('info', `[PM] ✓ Selected '${matchedOpt?.label || val}'`);
-                            } catch (e) { log('warn', `[PM] select failed: ${e.message}`); }
+            if (_botPaused) { await sleep(5000); continue; }
+            if (_cfg.commands_enabled.search) {
+                await runWithLock(async () => {
+                    const res = await sendAndWait(channel, 'pls search');
+                    if (res) {
+                        const btns   = getButtons(res);
+                        const target = btns.length ? (pickBestSearchButton(btns) || btns[0]) : null;
+                        if (target) {
+                            log('info', `[SEARCH] Clicking '${target.label}'`);
+                            try { await res.clickButton(target.customId); log('info', `[SEARCH] ✓ Clicked '${target.label}'`); }
+                            catch (e) { log('warn', `[SEARCH] ${e.message}`); }
                         }
                     }
-                    const posted = await clickButton(msg, 'Post');
-                    log(posted ? 'info' : 'warn', posted ? "[PM] ✓ Clicked 'Post'" : "[PM] ✗ 'Post' not found");
-                    await sleep(3000);
-                    try {
-                        const updated = await channel.messages.fetch(msg.id);
-                        if ((updated.embeds[0]?.description || '').includes('another 2 minutes')) {
-                            log('warn', '[PM] Rate-limited — overriding next send to +120s');
-                            nextSend.pm = Date.now() + 120000;
+                });
+            }
+            const ms = _cfg.limit_flags ? humanJitter(_cfg.search_cooldown * 1000) : _cfg.search_cooldown * 1000;
+            await sleep(ms);
+        }
+    }
+
+    async function digLoop() {
+        await sleep(6000);
+        while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
+            if (_cfg.commands_enabled.dig) {
+                await runWithLock(async () => {
+                    const res = await sendAndWait(channel, 'pls dig');
+                    if (res) {
+                        const desc = res.embeds[0]?.description || '';
+                        if (desc.includes('Dodge the Moleman'))     await handleDodge(res, 'Worm',     'MOLEMAN');
+                        else if (desc.includes('Dodge the Sludge')) await handleDodge(res, 'PinkBits', 'SLUDGE');
+                    }
+                });
+            }
+            const ms = _cfg.limit_flags ? humanJitter(_cfg.cooldown * 1000) : _cfg.cooldown * 1000;
+            await sleep(ms);
+        }
+    }
+
+    async function huntLoop() {
+        await sleep(9000);
+        while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
+            if (_cfg.commands_enabled.hunt) {
+                await runWithLock(async () => {
+                    const res = await sendAndWait(channel, 'pls hunt');
+                    if (res) {
+                        const desc = res.embeds[0]?.description || '';
+                        if (desc.includes('Dodge the Dragon')) await handleDodge(res, 'FireBall', 'FIREBALL');
+                    }
+                });
+            }
+            const ms = _cfg.limit_flags ? humanJitter(_cfg.cooldown * 1000) : _cfg.cooldown * 1000;
+            await sleep(ms);
+        }
+    }
+
+    async function crimeLoop() {
+        await sleep(12000);
+        while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
+            if (_cfg.commands_enabled.crime) {
+                await runWithLock(async () => {
+                    const res = await sendAndWait(channel, 'pls crime');
+                    if (res) {
+                        const btns   = getButtons(res);
+                        const target = btns.length ? (pickBestCrimeButton(btns) || btns[0]) : null;
+                        if (target) {
+                            log('info', `[CRIME] Clicking '${target.label}'`);
+                            try { await res.clickButton(target.customId); log('info', `[CRIME] ✓ Clicked '${target.label}'`); }
+                            catch (e) { log('warn', `[CRIME] ${e.message}`); }
                         }
-                    } catch (e) { log('warn', `[PM] Cooldown check failed: ${e.message}`); }
-                }
-            });
+                    }
+                });
+            }
+            const ms = _cfg.limit_flags ? humanJitter(_cfg.crime_cooldown * 1000) : _cfg.crime_cooldown * 1000;
+            await sleep(ms);
+        }
+    }
+
+    async function hlLoop() {
+        await sleep(15000);
+        while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
+            if (_cfg.commands_enabled.hl) {
+                await runWithLock(async () => {
+                    const res = await sendAndWait(channel, 'pls hl', _cfg.hl_wait_for);
+                    if (res) {
+                        const desc  = res.embeds[0]?.description || '';
+                        const match = desc.match(/\*\*(\d+)\*\*/);
+                        if (match) {
+                            const n = parseInt(match[1]);
+                            const choice = n <= 50 ? 'Higher' : 'Lower';
+                            log('info', `[HL] Number is ${n} → clicking '${choice}'`);
+                            const ok = await clickButton(res, choice);
+                            log(ok ? 'info' : 'warn', ok ? `[HL] ✓ Clicked '${choice}'` : `[HL] ✗ Failed`);
+                        } else {
+                            log('warn', '[HL] Could not parse number');
+                        }
+                    }
+                });
+            }
+            const ms = _cfg.limit_flags ? humanJitter(_cfg.hl_cooldown * 1000) : _cfg.hl_cooldown * 1000;
+            await sleep(ms);
+        }
+    }
+
+    async function pmLoop() {
+        await sleep(18000);
+        const PM_PLATFORMS = ['TikTok', 'Discord', 'Reddit', 'Twitter', 'Facebook'];
+        while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
+            let pmCooldown = _cfg.pm_cooldown;
+            if (_cfg.commands_enabled.pm) {
+                const platform = PM_PLATFORMS[Math.floor(Math.random() * PM_PLATFORMS.length)];
+                await runWithLock(async () => {
+                    const res = await sendAndWait(channel, 'pls pm');
+                    if (res) {
+                        const menuRows = getMenuRows(res);
+                        log('info', `[PM] Found ${menuRows.length} menu(s), platform='${platform}'`);
+                        if (menuRows.length > 0) {
+                            const platformRow = menuRows.find(({ menu }) =>
+                                (menu.options || []).some(o =>
+                                    PM_PLATFORMS.map(p => p.toLowerCase()).includes((o.label || '').toLowerCase())
+                                )
+                            ) || menuRows[menuRows.length - 1];
+                            const { rowIndex, menu } = platformRow;
+                            const matchedOpt = (menu.options || []).find(
+                                o => (o.label || '').trim().toLowerCase() === platform.toLowerCase()
+                            );
+                            const val = matchedOpt?.value || (menu.options?.length > 0 ? menu.options[0].value : null);
+                            if (val) {
+                                try {
+                                    await res.selectMenu(rowIndex, [val]);
+                                    log('info', `[PM] ✓ Selected '${matchedOpt?.label || val}'`);
+                                } catch (e) { log('warn', `[PM] select failed: ${e.message}`); }
+                            }
+                        }
+                        const posted = await clickButton(res, 'Post');
+                        log(posted ? 'info' : 'warn', posted ? "[PM] ✓ Clicked 'Post'" : "[PM] ✗ 'Post' not found");
+                        await sleep(3000);
+                        try {
+                            const updated = await channel.messages.fetch(res.id);
+                            if ((updated.embeds[0]?.description || '').includes('another 2 minutes')) {
+                                log('warn', '[PM] Rate-limited — waiting 120s');
+                                pmCooldown = 120;
+                            }
+                        } catch (e) { log('warn', `[PM] Cooldown check failed: ${e.message}`); }
+                    }
+                });
+            }
+            await sleep(pmCooldown * 1000);
         }
     }
 
@@ -2322,7 +2317,7 @@ client.on('ready', async () => {
     Promise.all([
         configReloadLoop(), heartbeatLoop(),
         cycleLoop(),
-        commandLoop(), interactionLoop(),
+        begLoop(), searchLoop(), digLoop(), huntLoop(), crimeLoop(), hlLoop(), pmLoop(),
         advLoop(),
         fishLoop(), transferLoop(),
         marketSniperLoop(), mothershipMarketLoop(),
