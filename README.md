@@ -14,8 +14,6 @@ A self-hosted, multi-account automation dashboard for Dank Memer on Discord. Run
 
 Join the [Support Server](https://discord.gg/bbRynPZpq)
 
----
-
 ## Table of Contents
 
 - [Features](#features)
@@ -28,26 +26,41 @@ Join the [Support Server](https://discord.gg/bbRynPZpq)
 - [Security](#security)
 - [License](#license)
 
----
-
 ## Features
 
 - **Multi-account management** — each account gets its own isolated bot process, balance tracker, and dashboard tab
+- **Fleet overview** — combined wallet, bank, and net worth totals across all accounts with per-account doughnut charts and a ranked leaderboard
 - **Live command toggles** — enable or disable hunt, dig, search, beg, crime, higher/lower, post meme, adventure, and fishing per account without restarting
 - **Market Sniper** — automatically scans `pls market view` and buys coin listings below your configured max price per item
 - **Fishing mode** — exclusive fishing loop with live catch stats, per-species chart, and configurable sell currency
 - **Balance & net worth tracking** — 30-second polling with historical charts for wallet, bank, and net worth
-- **Mothership transfer system** — designate one account as the fleet command; support vessels can send their full inventory and wallet in one click
+- **Mothership transfer system** — designate one account as the fleet command; support vessels can send their full inventory and wallet via friends share or market post in one click
 - **Stealth / anti-detection** — four preset modes (Strict / Moderate / Casual / Fast) controlling typing simulation, cooldown jitter, and uptime/downtime cycling
 - **Browser fingerprint** — always-on Chrome 103 / Chrome OS UA, `x-super-properties`, all `Sec-*` headers, dynamic Referer — replicates a real browser session regardless of other settings
-- **Risk mode** — per-account Low / Medium / High risk setting for search and crime that maps to different response choices
+- **Risk mode** — per-account Low / Medium / High / Custom risk setting for search and crime, with a draggable custom order list
 - **Adventure automation** — plays chosen adventure type end-to-end, auto-calculates cooldown from interaction count
 - **Cooldown control** — all timing values editable live from the dashboard, saved and hot-reloaded without restart
 - **Activity log** — live feed with All / Main / Balance / Warnings filters and per-entry source tagging
 
----
-
 ## Screenshots
+
+### Fleet Overview
+
+Combined totals across all accounts. The two doughnut charts break down wallet+bank balance and net worth per account. Auto-refreshes every 30 seconds.
+
+![Fleet Overview](docs/overview.png)
+
+### Account Leaderboard
+
+Sorted by net worth descending. Shows the mothership crown, online status, wallet, bank, net worth, and how recently each account's balance was updated.
+
+![Account Leaderboard](docs/leaderboard.png)
+
+### Mothership Transfer
+
+Support vessels can send items via Friends Share, items via Market Post, coins directly, or coins via Market Post. A notice reminds you to pause command handlers and have enough coins for market taxes before starting.
+
+![Mothership Transfer](docs/transfer.png)
 
 ### Connection & Bot Status
 
@@ -55,15 +68,11 @@ Account credentials, one-click save-and-restart, and live status cards. Browser 
 
 ![Connection and Bot Status](docs/connection.png)
 
----
-
 ### Mothership — Primary Account
 
 The designated mothership account is highlighted. Other accounts can transfer their full inventory and coins to it in one click.
 
 ![Mothership Primary](docs/mothership-primary.png)
-
----
 
 ### Mothership — Support Vessel
 
@@ -71,15 +80,11 @@ Support vessel accounts show which mothership they belong to and expose transfer
 
 ![Mothership Support Vessel](docs/mothership-support.png)
 
----
-
 ### Commands
 
-Toggle any of the 8 command loops on or off live. Changes take effect on the next cycle, no restart needed.
+Toggle any of the command loops on or off live. Changes take effect on the next cycle, no restart needed.
 
 ![Commands](docs/commands.png)
-
----
 
 ### Balance & Net Worth Tracker
 
@@ -87,15 +92,11 @@ Wallet, bank, and net worth polled every 30 seconds with full historical charts 
 
 ![Balance and Net Worth](docs/balance.png)
 
----
-
 ### Stealth Settings
 
 Four anti-detection presets. Casual mode shown: 40% typing chance, 100–300ms delay, 10% cooldown variance. Uptime/Downtime cycle configured to 30min active / 10min rest.
 
 ![Stealth Settings](docs/stealth.png)
-
----
 
 ### Market Sniper
 
@@ -103,31 +104,29 @@ Scans `pls market view` on a configurable interval and auto-buys coin listings u
 
 ![Market Sniper](docs/market-sniper.png)
 
----
-
 ### Fishing Mode
 
 Exclusive fishing loop, pauses all other commands and the balance tracker while active. Live stats: catches per species, bucket sells, and session time with a chart.
 
 ![Fishing](docs/fishing.png)
 
----
-
 ### Adventure
 
-Select adventure type from a dropdown. Cooldown is calculated automatically after each run based on interaction count, with a 60-second safety buffer.
+Select adventure type from a dropdown. Cooldown is calculated automatically after each run based on interaction count, with a 60-second safety buffer. Custom answers let you pick your own responses for each prompt.
 
 ![Adventure](docs/adventure.png)
 
----
+### Risk Mode — Custom Search Order
 
-### Risk Mode
+Set the search risk to Custom and drag locations into your preferred priority order. The bot works down the list from top to bottom.
 
-Per-account risk level for search and crime. Each level maps to a different set of response choices.
+![Risk Mode Custom Search](docs/risk-mode-search.png)
 
-![Risk Mode](docs/risk-mode.png)
+### Risk Mode — Custom Crime Order
 
----
+Same drag-to-reorder system for crime. Each preset (Low, Medium, High) maps to a fixed set of safe responses; Custom lets you define your own.
+
+![Risk Mode Custom Crime](docs/risk-mode-crime.png)
 
 ### Cooldowns & Timing
 
@@ -135,15 +134,11 @@ All timing values in one place. Auto-saved on change, hot-reloaded into the bot 
 
 ![Cooldowns](docs/cooldowns.png)
 
----
-
 ### Activity Log
 
 Live feed of every bot action, commands sent, responses received, button clicks, sniper events, stealth delays, warnings, and errors.
 
 ![Activity Log](docs/activity-log.png)
-
----
 
 ## Architecture
 
@@ -168,7 +163,7 @@ start.sh
 
 web/
   index.html              Single-page dashboard.
-  styles.css              All styles — dark mode, responsive layout.
+  styles.css              All styles, dark mode, responsive layout.
   scripts.js              Polling, chart rendering, account switching,
                           toggle and config save logic.
 ```
@@ -179,16 +174,12 @@ web/
 - Transfer trigger files let the dashboard request a mothership transfer; `main.js` picks them up on the next cycle
 - Config hot-reload: `main.js` reads `config.json` every 5 seconds and applies changed fields without restarting
 
----
-
 ## Requirements
 
 - Node.js 18 or later
 - Python 3.10 or later
 - `flask` Python package
 - A Discord account with a valid user token
-
----
 
 ## Installation
 
@@ -233,8 +224,6 @@ bash start.sh
 
 Open `http://localhost:5000`. The dashboard connects to your accounts and begins running enabled commands immediately.
 
----
-
 ## Configuration
 
 `config.json` is excluded from version control — it contains your Discord token. Use `config.example.json` as the reference template.
@@ -260,8 +249,8 @@ Open `http://localhost:5000`. The dashboard connects to your accounts and begins
 | `wait_for_response` | number | `10` | Command response timeout in seconds |
 | `adv_cooldown` | number | `1800` | Base adventure cooldown in seconds |
 | `adv_type` | string | — | Adventure name exactly as shown in-game |
-| `search_risk` | string | `medium` | `low`, `medium`, or `high` |
-| `crime_risk` | string | `medium` | `low`, `medium`, or `high` |
+| `search_risk` | string | `medium` | `low`, `medium`, `high`, or `custom` |
+| `crime_risk` | string | `medium` | `low`, `medium`, `high`, or `custom` |
 | `fish_sell_currency` | string | `coins` | `coins` or `tokens` |
 | `disable_interaction_lock` | boolean | `false` | Disable the single-command mutex (premium servers) |
 | `commands_enabled` | object | — | Keys: `hunt` `dig` `search` `beg` `crime` `hl` `pm` `adv` `fish`. Values: `true`/`false` |
@@ -304,30 +293,24 @@ Browser fingerprint headers (Chrome 103 / Chrome OS UA, `x-super-properties`, al
 | `accounts` | array | List of account objects |
 | `mothership_id` | string or null | `id` of the account that receives transfers |
 
----
-
 ## Getting your Discord token
 
 1. Open Discord in a **web browser** at `discord.com`. Do not use the desktop app.
 2. Press `F12` to open developer tools.
 3. Go to the **Network** tab and set the filter to **Fetch/XHR**.
 4. Send any message in any channel.
-5. Click one of the requests that appears. Open **Headers** → **Request Headers** → find `Authorization`. That value is your token.
+5. Click one of the requests that appears. Open **Headers** then **Request Headers** and find `Authorization`. That value is your token.
 
 > Your token gives complete access to your Discord account. Never share it, never commit `config.json`, and never paste it anywhere except your local config file.
 
----
-
 ## Security
 
-- `config.json` is in `.gitignore`, it will not be committed
+- `config.json` is in `.gitignore` and will not be committed
 - `balance_*.json` history files are also excluded
 - `attached_assets/` is excluded
 - Runtime state files (lock files, transfer triggers) are excluded
 - No credentials are logged or sent anywhere other than directly to Discord
-- The Flask server binds to `0.0.0.0:5000`, if you expose this port externally, add authentication
-
----
+- The Flask server binds to `0.0.0.0:5000` — if you expose this port externally, add authentication
 
 ## License
 
