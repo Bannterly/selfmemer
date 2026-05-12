@@ -228,7 +228,10 @@ client.on('ready', async () => {
             return;
         }
         waitingForBal = true;
-        await waitForMainLock();
+        const freshCfg = loadAccountConfig();
+        if (!freshCfg.disable_interaction_lock) {
+            await waitForMainLock();
+        }
         try {
             const sent = await channel.send('pls bal');
             sentBalMsgId = sent.id;
