@@ -1430,10 +1430,21 @@ client.on('ready', async () => {
             const waitFor = soonest === 'hl' ? _cfg.hl_wait_for : null;
             const res = await sendAndWait(channel, CMD_STR[soonest], waitFor);
 
-            // Schedule next send immediately after receiving response (or timing out)
-            nextSend[soonest] = Date.now() + getCooldownMs(soonest);
+            // For commands that require a button click, cooldown starts AFTER the
+            // button is successfully clicked (set inside the queue below).
+            // For beg/hl/pm there is no mandatory interaction so cooldown starts now.
+            const DEFERRED_CD = new Set(['hunt', 'dig', 'search', 'crime']);
+            if (!DEFERRED_CD.has(soonest)) {
+                nextSend[soonest] = Date.now() + getCooldownMs(soonest);
+            } else {
+                nextSend[soonest] = Infinity; // will be set after button click
+            }
 
-            if (!res) continue;
+            if (!res) {
+                // No response — apply cooldown immediately so the command isn't stuck
+                if (DEFERRED_CD.has(soonest)) nextSend[soonest] = Date.now() + getCooldownMs(soonest);
+                continue;
+            }
 
             // Capture loop-variable before pushing closure
             const cmd = soonest;
@@ -1443,11 +1454,13 @@ client.on('ready', async () => {
                 if (cmd === 'hunt') {
                     const desc = msg.embeds[0]?.description || '';
                     if (desc.includes('Dodge the Dragon')) await handleDodge(msg, 'FireBall', 'FIREBALL');
+                    nextSend[cmd] = Date.now() + getCooldownMs(cmd);
 
                 } else if (cmd === 'dig') {
                     const desc = msg.embeds[0]?.description || '';
                     if (desc.includes('Dodge the Moleman'))     await handleDodge(msg, 'Worm',     'MOLEMAN');
                     else if (desc.includes('Dodge the Sludge')) await handleDodge(msg, 'PinkBits', 'SLUDGE');
+                    nextSend[cmd] = Date.now() + getCooldownMs(cmd);
 
                 } else if (cmd === 'search') {
                     const btns   = getButtons(msg);
@@ -1457,6 +1470,7 @@ client.on('ready', async () => {
                         try { await msg.clickButton(target.customId); log('info', `[SEARCH] ✓ Clicked '${target.label}'`); }
                         catch (e) { log('warn', `[SEARCH] ${e.message}`); }
                     }
+                    nextSend[cmd] = Date.now() + getCooldownMs(cmd);
 
                 } else if (cmd === 'crime') {
                     const btns   = getButtons(msg);
@@ -1466,6 +1480,7 @@ client.on('ready', async () => {
                         try { await msg.clickButton(target.customId); log('info', `[CRIME] ✓ Clicked '${target.label}'`); }
                         catch (e) { log('warn', `[CRIME] ${e.message}`); }
                     }
+                    nextSend[cmd] = Date.now() + getCooldownMs(cmd);
 
                 } else if (cmd === 'hl') {
                     const desc  = msg.embeds[0]?.description || '';
