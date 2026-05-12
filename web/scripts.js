@@ -5,6 +5,8 @@ const themeIcon   = document.getElementById("theme-icon");
 let balChart  = null;
 let nwChart   = null;
 let fishChart = null;
+let ovBalPie  = null;
+let ovNwPie   = null;
 
 function applyTheme(t) {
   root.setAttribute("data-theme", t);
@@ -64,9 +66,10 @@ function escHtml(str) {
 }
 
 /* ── State ──────────────────────────────────────────── */
-let accounts    = [];
-let activeId    = null;
-let mothershipId = null;   // ID of the mothership account (or null)
+let accounts     = [];
+let activeId     = null;
+let mothershipId  = null;   // ID of the mothership account (or null)
+let overviewActive = false;
 
 // Per-account transient state
 const acctState = {}; // id -> { logSince, logEntries, logFilter, logAutoScroll, logCleared, clearedBefore }
@@ -89,6 +92,7 @@ let _statusInterval   = null;
 let _tabDotInterval   = null;
 let _transferInterval = null;
 let _fishStatsInterval = null;
+let _ovInterval       = null;
 
 function clearPolls() {
   clearInterval(_balInterval);
@@ -96,8 +100,10 @@ function clearPolls() {
   clearInterval(_statusInterval);
   clearInterval(_transferInterval);
   clearInterval(_fishStatsInterval);
+  clearInterval(_ovInterval);
   _transferInterval  = null;
   _fishStatsInterval = null;
+  _ovInterval        = null;
   clearSniperPolls();
 }
 
@@ -600,9 +606,10 @@ function updateMothershipUI() {
 
 async function triggerTransfer(type) {
   if (!activeId) return;
-  const btn = type === "items"
-    ? document.getElementById("transfer-items-btn")
-    : document.getElementById("transfer-coins-btn");
+  const btn = type === "items"         ? document.getElementById("transfer-items-btn")
+            : type === "market_items"  ? document.getElementById("transfer-market-btn")
+            : type === "market_coins"  ? document.getElementById("transfer-market-coins-btn")
+            :                            document.getElementById("transfer-coins-btn");
 
   try {
     if (btn) { btn.disabled = true; btn.textContent = "Starting…"; }
@@ -621,7 +628,11 @@ async function triggerTransfer(type) {
     if (btn) {
       btn.disabled = false;
       btn.innerHTML = type === "items"
-        ? `<svg class="icon" aria-hidden="true"><use href="#icon-list"/></svg> Send Items to Mothership`
+        ? `<svg class="icon" aria-hidden="true"><use href="#icon-list"/></svg> Send Items (Friends Share)`
+        : type === "market_items"
+        ? `<svg class="icon" aria-hidden="true"><use href="#icon-crosshair"/></svg> Send Items (Market Post)`
+        : type === "market_coins"
+        ? `<svg class="icon" aria-hidden="true"><use href="#icon-coins"/></svg> Send Coins (Market Post)`
         : `<svg class="icon" aria-hidden="true"><use href="#icon-coins"/></svg> Send Coins to Mothership`;
     }
   }
@@ -638,15 +649,25 @@ function setTransferStatusDisplay(status, done) {
 
   // Re-enable buttons when done
   if (done) {
-    const ib = document.getElementById("transfer-items-btn");
-    const cb = document.getElementById("transfer-coins-btn");
+    const ib  = document.getElementById("transfer-items-btn");
+    const mb  = document.getElementById("transfer-market-btn");
+    const cb  = document.getElementById("transfer-coins-btn");
+    const mcb = document.getElementById("transfer-market-coins-btn");
     if (ib) {
       ib.disabled = false;
-      ib.innerHTML = `<svg class="icon" aria-hidden="true"><use href="#icon-list"/></svg> Send Items to Mothership`;
+      ib.innerHTML = `<svg class="icon" aria-hidden="true"><use href="#icon-list"/></svg> Send Items (Friends Share)`;
+    }
+    if (mb) {
+      mb.disabled = false;
+      mb.innerHTML = `<svg class="icon" aria-hidden="true"><use href="#icon-crosshair"/></svg> Send Items (Market Post)`;
     }
     if (cb) {
       cb.disabled = false;
       cb.innerHTML = `<svg class="icon" aria-hidden="true"><use href="#icon-coins"/></svg> Send Coins to Mothership`;
+    }
+    if (mcb) {
+      mcb.disabled = false;
+      mcb.innerHTML = `<svg class="icon" aria-hidden="true"><use href="#icon-coins"/></svg> Send Coins (Market Post)`;
     }
   }
 }
@@ -670,6 +691,10 @@ function startTransferPolling() {
 
 /* ── Account switching ──────────────────────────────── */
 function switchAccount(id) {
+  overviewActive = false;
+  const ovEl = document.getElementById("overview-panel");
+  if (ovEl) ovEl.style.display = "none";
+  document.getElementById("main-content").style.display = "block";
   activeId = id;
   clearPolls();
 
@@ -719,6 +744,8 @@ function switchAccount(id) {
 
   applyRisk("search", acc.search_risk || "medium");
   applyRisk("crime",  acc.crime_risk  || "medium");
+  populateCustomRanking("search", acc.search_custom_ranking || []);
+  populateCustomRanking("crime",  acc.crime_custom_ranking  || []);
 
   const cmds = acc.commands_enabled || {};
   ["hunt","dig","search","beg","crime","hl","pm","adv","fish"].forEach(cmd => {
@@ -732,8 +759,9 @@ function switchAccount(id) {
   // Sync fish sell currency
   applyFishCurrency(acc.fish_sell_currency || 'coins');
 
-  // Adventure type
+  // Adventure type and response mode
   setAdvValue(acc.adv_type || "Pepe Goes to Space");
+  applyAdvMode(acc.adv_response_mode || "recommended");
 
   // Restore log filter button
   document.querySelectorAll(".log-filter-btn").forEach(b => b.classList.remove("active"));
@@ -775,12 +803,28 @@ function switchAccount(id) {
 
 /* ── Render tab bar ─────────────────────────────────── */
 function renderTabs() {
-  const container = document.getElementById("acct-tabs");
+  const container  = document.getElementById("acct-tabs");
+  const mainEl     = document.getElementById("main-content");
+  const ovEl       = document.getElementById("overview-panel");
   container.innerHTML = "";
+
+  if (accounts.length > 0) {
+    const ovTab = document.createElement("button");
+    ovTab.className  = "acct-tab ov-tab" + (overviewActive ? " active" : "");
+    ovTab.dataset.id = "__overview__";
+    ovTab.innerHTML  =
+      `<svg class="acct-ov-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">` +
+        `<path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>` +
+      `</svg>` +
+      `<span class="acct-tab-name">Overview</span>`;
+    ovTab.addEventListener("click", () => switchToOverview());
+    container.appendChild(ovTab);
+  }
+
   for (const acc of accounts) {
     const isMothership = acc.id === mothershipId;
     const tab = document.createElement("button");
-    tab.className   = "acct-tab" + (acc.id === activeId ? " active" : "") + (isMothership ? " mothership-tab" : "");
+    tab.className   = "acct-tab" + (acc.id === activeId && !overviewActive ? " active" : "") + (isMothership ? " mothership-tab" : "");
     tab.dataset.id  = acc.id;
     tab.innerHTML   =
       `<span class="acct-dot"></span>` +
@@ -799,8 +843,17 @@ function renderTabs() {
     });
     container.appendChild(tab);
   }
-  document.getElementById("no-accts").style.display   = accounts.length === 0 ? "flex" : "none";
-  document.getElementById("main-content").style.display = accounts.length === 0 ? "none" : "block";
+  document.getElementById("no-accts").style.display = accounts.length === 0 ? "flex" : "none";
+  if (accounts.length === 0) {
+    mainEl.style.display = "none";
+    if (ovEl) ovEl.style.display = "none";
+  } else if (overviewActive) {
+    mainEl.style.display = "none";
+    if (ovEl) ovEl.style.display = "block";
+  } else {
+    mainEl.style.display = activeId ? "block" : "none";
+    if (ovEl) ovEl.style.display = "none";
+  }
 }
 
 /* ── Load accounts ──────────────────────────────────── */
@@ -810,7 +863,9 @@ async function loadAccounts() {
     if (!res.ok) return;
     accounts = await res.json();
     renderTabs();
-    if (accounts.length > 0 && !accounts.find(a => a.id === activeId)) {
+    if (overviewActive && accounts.length > 0) {
+      // stay in overview
+    } else if (accounts.length > 0 && !accounts.find(a => a.id === activeId)) {
       switchAccount(accounts[0].id);
     }
   } catch {}
@@ -935,12 +990,8 @@ function applyFishCurrency(currency) {
 }
 
 function applyFishUI(fishOn) {
-  const note      = document.getElementById("fish-exclusive-note");
-  const secTitle  = document.getElementById("fish-section-title");
-  const secCard   = document.getElementById("fish-status-card");
-  if (note)     note.style.display     = fishOn ? "" : "none";
-  if (secTitle) secTitle.style.display = fishOn ? "" : "none";
-  if (secCard)  secCard.style.display  = fishOn ? "" : "none";
+  const panel = document.getElementById("fish-status-card");
+  if (panel) panel.style.display = fishOn ? "" : "none";
 
   if (fishOn) startFishStatsPolling();
   else        stopFishStatsPolling();
@@ -1184,6 +1235,138 @@ function setFishStatus(text, active = true) {
   if (txt) txt.textContent = text;
 }
 
+/* ── Custom ranking defaults (used for "Reset to Medium") ─── */
+const SEARCH_DEFAULT_RANKING = [
+  "Soul's chamber","The Gambler's Kingdom","Heist Circle Lounge","Heist Circle",
+  "Ultimate Dankers","Greg's Farm","Whole Foods","FightHub","ZomB's Grave",
+  "McDonald's","NOT a casino","Shadow's Realm","Aeradella's home","Dank Museum",
+  "Hospital","Kitchen","Dark room","Ocean","Bank","Bathroom","God's Own Place",
+  "Stock Market","Vegas Sphere","Twitch","Movie Theater","Briefcase","Beehive",
+  "Bushes","Attic","Crawlspace","Sewer","Tree","Lego bin","Uber","Van","Glovebox",
+  "Book","Coffee shop","Dog","Dumpster","Purse","Soup kitchen","#dank-chat","Garage",
+  "Fridge","Dresser","Mailbox","Car","Computer","Vacuum","Basement","Sink","Pantry",
+  "Grass","Shoe","Bus","Coat","Twitter","Pocket","Washer","Bed","Couch","Air",
+  "Toilet","Who asked","ZomB's Server","Toxic waste plant","Lovish's Gym",
+  "Phoenix pits","Police officer","Street","Tesla",
+];
+const CRIME_DEFAULT_RANKING = [
+  "Poaching","Child labor","Kicking dank memer","Gaslighting","Stab grandma",
+  "New player theft","Public urination","Idle hands","Poisoning","Piracy",
+  "Eating A Hot Dog Sideways","Grand Theft Auto","Paying for twitter blue",
+  "Identity theft","Driving under the influence","Drug distribution","Jay Walking",
+  "Murder","Bank robbing","Prostitution","Shoplifting","Cyber bullying","Boredom",
+  "Pineapple on pizza","Stealing from drug lords","Highway Robbery","Hacking",
+  "Littering","Vandalism","Tax evasion","Treason",
+  "Breaking and entering","Trespassing","Arson","Fraud",
+];
+
+/* ── Drag-sort rank list ─────────────────────────── */
+const DRAG_HANDLE_SVG = `<svg width="10" height="14" viewBox="0 0 10 14" fill="none" aria-hidden="true">
+  <circle cx="3" cy="2"  r="1.5" fill="currentColor"/>
+  <circle cx="7" cy="2"  r="1.5" fill="currentColor"/>
+  <circle cx="3" cy="7"  r="1.5" fill="currentColor"/>
+  <circle cx="7" cy="7"  r="1.5" fill="currentColor"/>
+  <circle cx="3" cy="12" r="1.5" fill="currentColor"/>
+  <circle cx="7" cy="12" r="1.5" fill="currentColor"/>
+</svg>`;
+
+function updateRankPositions(list) {
+  list.querySelectorAll(".rank-pos").forEach((el, i) => { el.textContent = i + 1; });
+}
+
+function refreshCustomCount(type) {
+  const list = document.getElementById(`${type}-rank-list`);
+  const cnt  = document.getElementById(`${type}-custom-count`);
+  if (!list || !cnt) return;
+  const n = list.querySelectorAll(".rank-item").length;
+  cnt.textContent = n > 0 ? `${n} items` : "";
+}
+
+function getRankListOrder(type) {
+  const list = document.getElementById(`${type}-rank-list`);
+  if (!list) return [];
+  return [...list.querySelectorAll(".rank-item")].map(el => el.dataset.value);
+}
+
+function buildRankList(type, items) {
+  const list = document.getElementById(`${type}-rank-list`);
+  if (!list) return;
+  const defaults = type === "search" ? SEARCH_DEFAULT_RANKING : CRIME_DEFAULT_RANKING;
+  const rows = items.length > 0 ? items : defaults;
+
+  list.innerHTML = "";
+  rows.forEach((name, i) => {
+    const row = document.createElement("div");
+    row.className = "rank-item";
+    row.draggable = true;
+    row.dataset.value = name;
+    row.innerHTML = `<span class="rank-handle">${DRAG_HANDLE_SVG}</span>
+      <span class="rank-pos">${i + 1}</span>
+      <span class="rank-name">${name}</span>`;
+    list.appendChild(row);
+  });
+
+  let dragging = null;
+  let dropRef  = null;  // { el, above }
+
+  list.addEventListener("dragstart", e => {
+    dragging = e.target.closest(".rank-item");
+    if (!dragging) return;
+    dragging.classList.add("rank-dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", "");
+  });
+
+  list.addEventListener("dragover", e => {
+    e.preventDefault();
+    const target = e.target.closest(".rank-item");
+    list.querySelectorAll(".rank-item").forEach(el => {
+      el.classList.remove("rank-drop-above", "rank-drop-below");
+    });
+    if (!target || target === dragging) return;
+    const rect  = target.getBoundingClientRect();
+    const above = e.clientY < rect.top + rect.height / 2;
+    target.classList.add(above ? "rank-drop-above" : "rank-drop-below");
+    dropRef = { el: target, above };
+  });
+
+  list.addEventListener("dragleave", e => {
+    if (!list.contains(e.relatedTarget)) {
+      list.querySelectorAll(".rank-item").forEach(el => {
+        el.classList.remove("rank-drop-above", "rank-drop-below");
+      });
+      dropRef = null;
+    }
+  });
+
+  list.addEventListener("drop", e => {
+    e.preventDefault();
+    list.querySelectorAll(".rank-item").forEach(el => {
+      el.classList.remove("rank-drop-above", "rank-drop-below");
+    });
+    if (!dragging || !dropRef) return;
+    const { el, above } = dropRef;
+    list.insertBefore(dragging, above ? el : el.nextSibling);
+    updateRankPositions(list);
+    dropRef = null;
+  });
+
+  list.addEventListener("dragend", () => {
+    if (dragging) dragging.classList.remove("rank-dragging");
+    list.querySelectorAll(".rank-item").forEach(el => {
+      el.classList.remove("rank-drop-above", "rank-drop-below");
+    });
+    dragging = null;
+    dropRef  = null;
+  });
+
+  refreshCustomCount(type);
+}
+
+function populateCustomRanking(type, ranking) {
+  buildRankList(type, ranking);
+}
+
 function applyRisk(type, level) {
   const group = document.getElementById(`risk-${type}`);
   if (!group) return;
@@ -1191,6 +1374,8 @@ function applyRisk(type, level) {
     btn.className = "seg-btn";
     if (btn.dataset.level === level) btn.classList.add(`active-${level}`);
   });
+  const panel = document.getElementById(`${type}-custom-panel`);
+  if (panel) panel.classList.toggle("open", level === "custom");
 }
 
 /* ── Command toggle clicks ──────────────────────────── */
@@ -1255,13 +1440,224 @@ document.querySelectorAll(".seg-btn").forEach(btn => {
   });
 });
 
+/* ── Custom ranking save / reset ────────────────── */
+["search", "crime"].forEach(type => {
+  const label    = type === "search" ? "Search" : "Crime";
+  const defaults = type === "search" ? SEARCH_DEFAULT_RANKING : CRIME_DEFAULT_RANKING;
+
+  document.getElementById(`${type}-custom-reset`)?.addEventListener("click", () => {
+    buildRankList(type, defaults);
+  });
+
+  document.getElementById(`${type}-custom-save`)?.addEventListener("click", async () => {
+    const ranking = getRankListOrder(type);
+    if (ranking.length === 0) { showToast("Nothing to save", "err"); return; }
+    await pushAccountConfig({ [`${type}_custom_ranking`]: ranking });
+    const acc = accounts.find(a => a.id === activeId);
+    if (acc) acc[`${type}_custom_ranking`] = ranking;
+    showToast(`${label} ranking saved — ${ranking.length} items`);
+  });
+});
+
+/* ── Adventure prompts data ──────────────────────── */
+const ADV_PROMPTS = {
+  'Pepe Goes to Space': [
+    { id: 'karaoke bar',              prompt: 'You find yourself floating next to an intergalactic karaoke bar. What do you do?',                     choices: ['Sing', 'Decline'] },
+    { id: 'ran out of fuel',          prompt: 'You ran out of fuel! What\'s next?',                                                                   choices: ['Give Up', 'Urinate', 'Search a planet'] },
+    { id: 'shooting star',            prompt: 'You see a shooting star!',                                                                             choices: ['Shoot at it', 'Wish', 'Take a picture'] },
+    { id: 'abducted by a group of aliens', prompt: 'You got abducted by a group of aliens, who are trying to probe you. What do you do?',            choices: ['Flee', 'Sit Back and Enjoy'] },
+    { id: 'transmission from deep space', prompt: 'You\'re picking up a transmission from deep space!',                                              choices: ['#;:$/}~@/,@~', '*<)#%\':]|##', 'Ignore'] },
+    { id: 'space kitchen',            prompt: 'Whaaaat!? You found a space kitchen! It looks like it is full of shady stuff. What do you do?',        choices: ['Inspect', 'Ignore'] },
+    { id: 'never gonna give you up',  prompt: 'Oh my god even in space you cannot escape it',                                                         choices: ['Never gonna give you up'] },
+    { id: 'dying star',               prompt: 'You flew past a dying star',                                                                           choices: ['Reach for it', 'Flee'] },
+    { id: 'dank sidious',             prompt: 'You encountered someone named Dank Sidious, what do you do?',                                          choices: ['Do it', 'Flee'] },
+    { id: 'radioactive chemicals',    prompt: 'This planet seems to be giving off radioactive chemicals. What do you do?',                            choices: ['Leave', 'Distant Scan', 'Land And Explore'] },
+    { id: 'webb telescope',           prompt: 'You accidentally bumped into the Webb Telescope. Oh god.',                                             choices: ['Try and Fix it', 'Flee'] },
+    { id: 'strange looking object',   prompt: 'You found a strange looking object. What do you do?',                                                  choices: ['Ignore', 'Inspect'] },
+    { id: 'dark pyramid',             prompt: 'You come upon a dark pyramid shaped ship fighting a spherical white ball. What do you do?',            choices: ['Take Back Light', 'Embrace Dark'] },
+    { id: 'friendly alien approached', prompt: 'A friendly alien approached you slowly. What do you do?',                                            choices: ['Attack', 'Talk', 'Probe'] },
+    { id: 'small but wise green alien', prompt: 'A small but wise green alien approaches you.',                                                       choices: ['Do', 'Do Not', 'Try'] },
+    { id: 'odd eyes floating',        prompt: 'You uh, just came across a pair of Odd Eyes floating around',                                          choices: ['Collect', 'Flee'] },
+    { id: 'space puppy',              prompt: 'You discover an adorable space puppy stuck on an asteroid. What do you do?',                           choices: ['Rescue', 'Leave'] },
+    { id: 'vending machine',          prompt: 'You find a vending machine selling \'Moon Pies\'. What do you do?',                                   choices: ['Buy', 'Ignore'] },
+    { id: 'cosmic bakery',            prompt: 'You encounter a cosmic bakery selling "Galaxy Donuts." What do you do?',                               choices: ['Buy', 'Ignore'] },
+  ],
+  'Pepe Goes out West': [
+    { id: 'broken down wagon',        prompt: 'A lady next to a broken down wagon is yelling for help.',                                              choices: ['Help Her', 'Ignore Her'] },
+    { id: 'dope ass cowboy hat',      prompt: 'You encounter someone with a dope ass cowboy hat who seems to enjoy radio equipment and lockpicking.', choices: ['Huff a muffin', 'Compare ass sizes', 'Pick a lock together'] },
+    { id: 'entered the saloon to rest', prompt: 'You entered the saloon to rest from the journey. What do you want to do?',                          choices: ['Throw a drink', 'Take a drink', 'Play the piano', 'Gamble'] },
+    { id: 'bandits about to rob the local towns bank', prompt: 'You see some bandits about to rob the local towns bank. What do you do?',            choices: ['Stop them', 'Run away', 'Report them', 'Join them'] },
+    { id: 'bitten by a rattlesnake',  prompt: 'You stumble upon someone claiming to have been bitten by a rattlesnake. They say they need your help.', choices: ['Walk away', 'Suck it', 'Give them medicine', 'Rob them'] },
+    { id: 'old abandoned mine',       prompt: 'You wander towards an old abandoned mine.',                                                            choices: ['Walk away', 'Go in'] },
+    { id: 'dying of thirst',          prompt: 'You\'re dying of thirst. Where do you want to get water?',                                            choices: ['Water Fountain', 'Old Creek', 'Cactus'] },
+    { id: 'riding on your horse and you get ambushed', prompt: 'You\'re riding on your horse and you get ambushed. What do you do?',                 choices: ['Fight back', 'Run away'] },
+    { id: 'horse sees a snake',       prompt: 'Your horse sees a snake and throws you off. What do you do?',                                          choices: ['Report to sheriff', 'Find a new horse', 'Kill the snake'] },
+    { id: 'catch one of em',          prompt: 'Catch one of em!',                                                                                     choices: ['🐄', '🐄', '🐄'] },
+    { id: 'lost and asks you for directions', prompt: 'Someone on the trail is lost and asks you for directions.',                                    choices: ['Ignore them', 'Help them'] },
+    { id: 'train',                    prompt: 'You get on a train and some bandits decide to rob the train. What do you do?',                         choices: ['Fight back', 'Don\'t hurt me!'] },
+    { id: 'stray horse',              prompt: 'You found a stray horse. What do you want to do?',                                                     choices: ['Feed', 'Ignore', 'Tame'] },
+    { id: 'horse stables',            prompt: 'You bump into someone near the horse stables. They challenge you to a duel!',                          choices: ['Run away', 'Lets duel!'] },
+    { id: 'dank cellar',              prompt: 'You find a dank cellar with an old wooden box',                                                        choices: ['Grab it', 'Ignore it'] },
+    { id: 'wanted:',                  prompt: 'WANTED: Who will you take down?',                                                                      choices: ['Jesse James', 'Billy Bob Jr.', 'Davy Jones'] },
+    { id: 'getting ambushed by bandits', prompt: 'Someone is getting ambushed by bandits!',                                                          choices: ['Save them', 'Ignore them'] },
+    { id: 'saloon with a poker game', prompt: 'You come across a saloon with a poker game going on inside. What do you want to do?',                  choices: ['Join', 'Ignore'] },
+    { id: 'mechanical bull',          prompt: 'You go to a saloon where there\'s a sick looking mechanical bull ready for riding.',                   choices: ['Ride it', 'Kill it'] },
+    { id: 'find an abandoned mine',   prompt: 'You find an abandoned mine. What do you want to do?',                                                  choices: ['Explore', 'Ignore'] },
+    { id: 'quick draw',               prompt: 'A stranger challenges you to a quick draw. What do you want to do?',                                   choices: ['Accept', 'Decline'] },
+  ],
+  'Pepe Goes Down Under': [
+    { id: 'animal sanctuary',         prompt: 'You visit an animal sanctuary and learn a lot. What do you get from the gift shop?',                   choices: ['Koala Sign', 'War Emu Statue', 'Toy Spider Nest', 'Australia Map', 'Nothing'] },
+    { id: "can't decide where to go next", prompt: 'There\'s so much to do, you can\'t decide where to go next.',                                    choices: ['Go hunting', 'Explore the Outback', 'Hit the beach'] },
+    { id: 'scuba diving group',       prompt: 'A scuba diving group invites you on an outing to explore the Great Barrier Reef.',                     choices: ['Explore alone', 'Stay together'] },
+    { id: 'kangaroo fight club',      prompt: 'You stumble upon an underground kangaroo fight club.',                                                 choices: ['Fight', 'Place a bet', 'Report it'] },
+    { id: 'throaty growl',            prompt: 'While hiking through the woods north of Victoria, you hear a deep, throaty growl.',                    choices: ['Find the source', 'Run Away'] },
+    { id: 'nice gal at macca',        prompt: 'You meet a nice gal at Macca\'s who tells you she can take you to see some animals – for a price.',   choices: ['Pay up', 'Ask for a discount'] },
+    { id: 'god of thunder',           prompt: 'You meet someone who looks like the God of Thunder at the beach, and he offers to teach you to surf.', choices: ['Hit the waves', 'Sit and watch'] },
+    { id: 'aussie aussie aussie',     prompt: 'You stumble into a crowd yelling, "Aussie Aussie Aussie," and there is only one thing to do.',         choices: ['Oi! Oi! Oi!', 'Ignore it'] },
+    { id: 'wallaby',                  prompt: 'While you\'re driving along, a wallaby, a kangaroo, and a crocodile cross the road.',                  choices: ['Why?', 'Sweet!'] },
+    { id: 'sock wiggles',             prompt: 'While searching your suitcase for your favorite thongs, one of your socks wiggles on its own.',        choices: ['Deal with it another day', 'Lift the sock'] },
+    { id: 'snake in your bed',        prompt: 'Is that a snake in your bed, or are you just happy to... wait, no that\'s definitely a snake!',        choices: ['Scream', 'Run', 'Freeze'] },
+    { id: 'kangaroo island',          prompt: 'While walking around Kangaroo Island you stumble across an egg on the ground. What do you do with it?', choices: ['Eat it raw', 'Cook it', 'Take it home'] },
+    { id: 'exploring the outback',    prompt: 'While exploring the Outback, you get a little lost but find some footprints near a creek.',            choices: ['Follow the footprints', 'Follow the creek'] },
+    { id: 'great barrier reef has inspired you', prompt: 'The beautiful Great Barrier Reef has inspired you. What do you do with this newly found source of inspiration?', choices: ['Admire the view', 'Go snorkeling', 'Go fishing'] },
+    { id: 'gathering on the beach',   prompt: 'One night you\'re invited to a gathering on the beach, and it turns out to be a barbecue.',            choices: ['Eat up', 'Wander alone'] },
+    { id: 'vegemite',                 prompt: 'While out drinking with some new mates, they find out you\'ve never had Vegemite and declare it\'s your time.', choices: ['Little bite', 'Big bite', 'Pass'] },
+    { id: 'chuck a sickie',           prompt: 'One of your new friends asks you to, "Chuck a sickie and grab a stubby," and you aren\'t sure how to respond.', choices: ['Say yes', 'Say no'] },
+    { id: 'spider has taken up residence', prompt: 'When you return to your hotel, you find a spider has taken up residence in your room.',           choices: ['Burn the place down', 'Kill it', 'Leave it be'] },
+    { id: 'website designer',         prompt: 'You meet a website designer in a coffee shop and he gives you his business card.',                      choices: ['Hire him', 'Throw it away'] },
+  ],
+  'Pepe Goes on Vacation': [
+    { id: 'family road trip',         prompt: 'A family road trip is a perfect getaway until you end up lost and without cell service. What do you do?', choices: ['Keep Driving', 'Stop for Directions'] },
+    { id: 'amusement park',           prompt: 'A family vacation can\'t be complete without a trip to an amusement park. What ride are you dying to try?', choices: ['Rollercoaster', 'Waterslide'] },
+    { id: 'mountain resort',          prompt: 'A friend tells you about a quaint mountain resort. What do you do after you arrive?',                   choices: ['Go Skiing', 'Visit the Hotel Bar'] },
+    { id: 'camping',                  prompt: 'Camping has always relaxed you, so you decide to vacation in the wilderness. What sort of camping do you prefer?', choices: ['Rent an RV', 'Use a Tent'] },
+    { id: 'lisbon',                   prompt: 'During your vacation in Lisbon, the hotel offers you a small pastry for breakfast. What do you do?',    choices: ['Eat it', 'Pass'] },
+    { id: 'paris',                    prompt: 'Nothing can beat a romantic vacation in Paris. What do you want to do first?',                          choices: ['The Eiffel Tower', 'The Louvre'] },
+    { id: 'rome',                     prompt: 'While vacationing in Rome, you visit the Colosseum and run into a group handing out friendship bracelets.', choices: ['Take a Bracelet', 'Say No'] },
+    { id: 'sightseeing',              prompt: 'You can\'t go on vacation without doing a little sightseeing. What do you want to see?',               choices: ['Museum', 'Concert'] },
+    { id: 'famous landmarks',         prompt: 'You decide it\'s time to visit some famous landmarks in the United States. Which do you visit first?', choices: ['The Grand Canyon', 'Mt. Rushmore'] },
+    { id: 'beach',                    prompt: 'You decide the beach sounds like a perfect choice for a weekend away. Which beach do you want to visit?', choices: ['Daytona Beach, Florida', 'Santa Monica, California'] },
+    { id: 'legoland',                 prompt: 'You decide to pick up Badosz and spend the weekend at Legoland. What do you look at first?',            choices: ['Mini Lego City', 'Gift Shop'] },
+    { id: 'whale watching',           prompt: 'You find a discounted whale watching tour and decide to give it a go, but the deal is for two. Who do you take with you?', choices: ['Melmsie', 'Kable', 'Your mom'] },
+    { id: 'cruise ship',              prompt: 'Your cruise ship docks at a small island for a day of sun and swimming. What do you do?',               choices: ['Swim', 'Sunbathe', 'Stay on the Boat'] },
+    { id: 'discount cruises',         prompt: 'You get a flyer for some discount cruises that sound wonderful. Which destination do you choose?',      choices: ['Mediterranean', 'Caribbean'] },
+    { id: 'stargazing',               prompt: 'You decide to go stargazing in the Chilean desert, but there are only two flights left. Which do you take?', choices: ['Morning', 'Night'] },
+  ],
+  'Pepe Goes Fishing with Friends': [],
+  'Pepe Goes to the Museum': [
+    { id: 'fossils',                  prompt: 'While examining fossils in the Aquatic World exhibit, you are drowning in information. What do you do?', choices: ['Power through', 'Find a bench'] },
+    { id: 'pepe history collection',  prompt: 'The Pepe History collection is filled with works of art. Which area do you want to explore?',           choices: ['Paintings', 'Sculptures', 'Neither'] },
+    { id: 'hall of human history',    prompt: 'While exploring the Hall of Human History, a wall of tools catches your eye. You always wanted bolt cutters...', choices: ['Steal them', 'Walk On'] },
+    { id: 't-rex skeleton',           prompt: 'You finally found the T-Rex skeleton. How do you make the most of this moment?',                       choices: ['Climb it, duh', 'Take a picture'] },
+    { id: 'gift shop',                prompt: 'You stop by the gift shop to snag a souvenir, but there is so much to choose from. How do you decide?', choices: ['Ask someone', 'Flip a coin'] },
+    { id: 'dark hallway with two doors', prompt: 'You take a wrong turn and end up in a long, dark hallway with two doors. Which do you choose?',    choices: ['Left', 'Right'] },
+    { id: 'legendary beasts',         prompt: 'When you enter the Legendary Beasts exhibit, the lights go out and the doors close. Which exhibit do you brave?', choices: ['Kraken', 'Dragon'] },
+    { id: 'pharaoh exhibit',          prompt: 'The pharaoh exhibit is closed, so you decide to learn about modern medicine instead. Which part do you see first?', choices: ['Pharmacology', 'Virology'] },
+    { id: 'bathroom',                 prompt: 'It\'s time to fight against a busload of kids for the bathroom. When you get to the front, two stalls are available.', choices: ['Broken Lock', 'Disgusting Floor'] },
+    { id: 'age of the internet',      prompt: 'You\'ve found the Age of the Internet displays. Where do you want to begin?',                          choices: ['Computers', 'Social Media'] },
+    { id: 'pepe history display',     prompt: 'You finally found your favorite exhibit! The Pepe History display has memes, pepes, and a place to play Dank Memer. What do you check out first?', choices: ['Pepe Crown', 'Pepe Trophy', 'Pepe Medal', 'Pepe Coin'] },
+    { id: 'artifact cafe',            prompt: 'You stop for lunch at the Artifact Cafe, but it\'s Taco Tuesday and the lines are endless. What do you do?', choices: ['Wait for tacos', 'Hit the vending machine'] },
+    { id: 'history of domestic pets', prompt: 'While exploring the History of Domestic Pets, the path splits and you must make a choice that has plagued humanity for centuries.', choices: ['Cats', 'Dogs'] },
+    { id: 'education through the ages', prompt: 'You see your ex approaching and duck into the Education through the Ages exhibit. Which hall do you choose?', choices: ['Science', 'Economics'] },
+    { id: 'licking one of the paintings', prompt: 'A security guard catches you trying to lick one of the paintings for a TikTok prank. What do you do?', choices: ['It\'s just a prank bro', 'Apologise', 'Run'] },
+    { id: 'decades of distilleries',  prompt: 'You spend a few hours in the Decades of Distilleries exhibit. Which do you visit before you go?',      choices: ['Whiskey', 'Vodka'] },
+    { id: 'weird and unexplained',    prompt: 'In the Weird and Unexplained showcase, you begin to feel like something is watching you. What do you do?', choices: ['Join a group', 'Ignore it'] },
+    { id: 'hunter-gatherer exhibit',  prompt: 'The life-sized figures in the hunter-gatherer exhibit are creeping you out. Which path do you choose?', choices: ['Hunting', 'Fishing'] },
+    { id: 'bird has gotten into the museum', prompt: 'A bird has gotten into the museum. Staff are offering a reward to anyone who helps catch it. Which exhibit do you check first?', choices: ['U.S. Presidents', 'Voyages on the High Seas'] },
+    { id: 'virtual reality',          prompt: 'The museum is hosting a virtual reality trip through a biome of your choice. Which do you choose?',    choices: ['Ocean Biome', 'Tropical Rainforest'] },
+  ],
+  'Pepe goes to Brazil': [
+    { id: 'christ the redeemer',      prompt: 'You can\'t visit Rio de Janeiro without touring the Christ the Redeemer statue. How do you get there?',  choices: ['Bus', 'Uber'] },
+    { id: 'brazilian cheese bread',   prompt: 'You stop at a local bakery for some of the Brazilian cheese bread. What else do you try?',               choices: ['Brigaderio', 'Nothing'] },
+    { id: 'brazilian steakhouse',     prompt: 'While visiting Rio Grande do Sul, you stop at one of the famous Brazilian steakhouses. What do you want?', choices: ['Give me the meat!', 'The buffet'] },
+    { id: 'capybaras',                prompt: 'While visiting São Paulo, you find a place to see capybaras. What do you do?',                           choices: ['Pull up', 'Hop out'] },
+    { id: 'amazon river',             prompt: 'You take a boat tour down the Amazon River. At a fork, the guide says right are piranhas and left anacondas. Which?', choices: ['Anacondas', 'Piranhas'] },
+    { id: 'carnival',                 prompt: 'You decide to hit the streets and check out the bands playing music during Carnival. What do you do first?', choices: ['Get a Drink', 'Dance', 'Join a Band'] },
+  ],
+};
+
 /* ── Adventure custom dropdown ───────────────────── */
 const advDropdown = document.getElementById("adv-dropdown");
 const advTrigger  = document.getElementById("adv-trigger");
 const advPanel    = document.getElementById("adv-panel");
 const advTriggerName = document.getElementById("adv-trigger-name");
 
-let _advValue = "Pepe Goes to Space";
+let _advValue   = "Pepe Goes to Space";
+let _advMode    = "recommended";
+let _advCustom  = {};
+
+const advCustomPanel = document.getElementById("adv-custom-panel");
+const advCustomList  = document.getElementById("adv-custom-list");
+
+function renderAdvPrompts(advType, customResponses) {
+  const prompts = ADV_PROMPTS[advType] || [];
+  advCustomList.innerHTML = "";
+  if (prompts.length === 0) {
+    advCustomList.innerHTML = '<div style="padding:14px 18px;font-size:12px;color:var(--text-3)">No prompts available for this adventure.</div>';
+    return;
+  }
+  prompts.forEach(({ id, prompt, choices }) => {
+    const current = customResponses[id];
+    const item = document.createElement("div");
+    item.className = "adv-prompt-item";
+    const pt = document.createElement("div");
+    pt.className = "adv-prompt-text";
+    pt.textContent = prompt;
+    item.appendChild(pt);
+    const choicesEl = document.createElement("div");
+    choicesEl.className = "adv-choices";
+    choices.forEach(choice => {
+      const btn = document.createElement("div");
+      btn.className = "adv-choice" + (current === choice ? " selected" : "");
+      btn.innerHTML = `<span class="adv-choice-dot"></span>${escHtml(choice)}`;
+      btn.addEventListener("click", () => {
+        choicesEl.querySelectorAll(".adv-choice").forEach(b => b.classList.remove("selected"));
+        btn.classList.add("selected");
+        _advCustom[id] = choice;
+        const acc = accounts.find(a => a.id === activeId);
+        const allCustom = acc?.adv_custom_responses || {};
+        if (!allCustom[advType]) allCustom[advType] = {};
+        allCustom[advType][id] = choice;
+        pushAccountConfig({ adv_custom_responses: allCustom });
+        const idx = accounts.findIndex(a => a.id === activeId);
+        if (idx !== -1) {
+          if (!accounts[idx].adv_custom_responses) accounts[idx].adv_custom_responses = {};
+          if (!accounts[idx].adv_custom_responses[advType]) accounts[idx].adv_custom_responses[advType] = {};
+          accounts[idx].adv_custom_responses[advType][id] = choice;
+        }
+      });
+      choicesEl.appendChild(btn);
+    });
+    item.appendChild(choicesEl);
+    advCustomList.appendChild(item);
+  });
+}
+
+function applyAdvMode(mode) {
+  _advMode = mode;
+  document.querySelectorAll(".adv-mode-btn").forEach(b => {
+    b.classList.toggle("active", b.dataset.mode === mode);
+  });
+  if (mode === "custom") {
+    advCustomPanel.classList.add("open");
+    const acc = accounts.find(a => a.id === activeId);
+    const customResponses = (acc?.adv_custom_responses || {})[_advValue] || {};
+    renderAdvPrompts(_advValue, customResponses);
+  } else {
+    advCustomPanel.classList.remove("open");
+  }
+}
+
+document.querySelectorAll(".adv-mode-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const mode = btn.dataset.mode;
+    if (mode === _advMode) return;
+    applyAdvMode(mode);
+    pushAccountConfig({ adv_response_mode: mode });
+    const idx = accounts.findIndex(a => a.id === activeId);
+    if (idx !== -1) accounts[idx].adv_response_mode = mode;
+  });
+});
 
 function setAdvValue(val) {
   _advValue = val;
@@ -1269,6 +1665,11 @@ function setAdvValue(val) {
   advPanel.querySelectorAll(".adv-option").forEach(o => {
     o.classList.toggle("selected", o.dataset.value === val);
   });
+  if (_advMode === "custom") {
+    const acc = accounts.find(a => a.id === activeId);
+    const customResponses = (acc?.adv_custom_responses || {})[val] || {};
+    renderAdvPrompts(val, customResponses);
+  }
 }
 
 function openAdv() {
@@ -1413,8 +1814,16 @@ document.getElementById("transfer-items-btn").addEventListener("click", () => {
   triggerTransfer("items");
 });
 
+document.getElementById("transfer-market-btn").addEventListener("click", () => {
+  triggerTransfer("market_items");
+});
+
 document.getElementById("transfer-coins-btn").addEventListener("click", () => {
   triggerTransfer("coins");
+});
+
+document.getElementById("transfer-market-coins-btn").addEventListener("click", () => {
+  triggerTransfer("market_coins");
 });
 
 /* ── Market Sniper ──────────────────────────────────── */
@@ -1608,6 +2017,185 @@ document.getElementById("sniper-reset-btn").addEventListener("click", async () =
   fetchSniperStats();
   showToast("Sniper stats reset");
 });
+
+/* ── Overview Tab ───────────────────────────────────── */
+const OV_PALETTE = [
+  '#3b82f6','#f59e0b','#10b981','#8b5cf6','#ef4444',
+  '#06b6d4','#f97316','#84cc16','#ec4899','#6366f1',
+];
+
+function switchToOverview() {
+  overviewActive = true;
+  clearPolls();
+  activeId = null;
+  document.getElementById("main-content").style.display = "none";
+  document.getElementById("overview-panel").style.display = "block";
+  document.querySelectorAll(".acct-tab").forEach(t =>
+    t.classList.toggle("active", t.dataset.id === "__overview__"));
+  fetchOverview();
+  _ovInterval = setInterval(fetchOverview, 30000);
+}
+
+function getPieCfg(labels, values, colors, total) {
+  const dark = root.getAttribute("data-theme") === "dark";
+  const tooltipBg = dark ? "rgba(30,30,30,0.95)" : "rgba(255,255,255,0.95)";
+  const tooltipBd = dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)";
+  const titleClr  = dark ? "#fafafa" : "#09090b";
+  const bodyClr   = dark ? "#a1a1aa" : "#52525b";
+  const legendClr = dark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.5)";
+  return {
+    type: "doughnut",
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        backgroundColor: colors.map(c => c + "cc"),
+        borderColor:     colors,
+        borderWidth: 2,
+        hoverOffset: 6,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      animation: { duration: 350 },
+      cutout: "62%",
+      plugins: {
+        legend: {
+          position: "bottom",
+          labels: {
+            color: legendClr,
+            font: { size: 11 },
+            boxWidth: 10, boxHeight: 10,
+            padding: 10,
+            usePointStyle: true, pointStyle: "circle",
+          },
+        },
+        tooltip: {
+          backgroundColor: tooltipBg,
+          borderColor: tooltipBd, borderWidth: 1,
+          titleColor: titleClr, bodyColor: bodyClr,
+          titleFont: { size: 11, weight: "700" }, bodyFont: { size: 11 }, padding: 10,
+          callbacks: {
+            label: item => {
+              const val = item.parsed;
+              const pct = total > 0 ? ((val / total) * 100).toFixed(1) : "0.0";
+              return ` ${fmtCoins(val)}  (${pct}%)`;
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+function buildBalPie(data) {
+  const wrap  = document.getElementById("ov-bal-pie-wrap");
+  const empty = document.getElementById("ov-bal-empty");
+  const rows  = data.filter(d => (d.wallet ?? 0) + (d.bank ?? 0) > 0);
+  if (rows.length === 0) {
+    if (wrap)  wrap.style.display  = "none";
+    if (empty) empty.classList.remove("hidden");
+    if (ovBalPie) { ovBalPie.destroy(); ovBalPie = null; }
+    return;
+  }
+  if (wrap)  wrap.style.display  = "";
+  if (empty) empty.classList.add("hidden");
+  const labels = rows.map(d => d.name);
+  const values = rows.map(d => (d.wallet ?? 0) + (d.bank ?? 0));
+  const colors = rows.map((_, i) => OV_PALETTE[i % OV_PALETTE.length]);
+  const total  = values.reduce((a, b) => a + b, 0);
+  const ctx    = document.getElementById("ov-balance-pie").getContext("2d");
+  if (ovBalPie) ovBalPie.destroy();
+  ovBalPie = new Chart(ctx, getPieCfg(labels, values, colors, total));
+}
+
+function buildNwPie(data) {
+  const wrap  = document.getElementById("ov-nw-pie-wrap");
+  const empty = document.getElementById("ov-nw-empty");
+  const rows  = data.filter(d => d.net_worth != null && d.net_worth > 0);
+  if (rows.length === 0) {
+    if (wrap)  wrap.style.display  = "none";
+    if (empty) empty.classList.remove("hidden");
+    if (ovNwPie) { ovNwPie.destroy(); ovNwPie = null; }
+    return;
+  }
+  if (wrap)  wrap.style.display  = "";
+  if (empty) empty.classList.add("hidden");
+  const labels = rows.map(d => d.name);
+  const values = rows.map(d => d.net_worth);
+  const colors = rows.map((_, i) => OV_PALETTE[i % OV_PALETTE.length]);
+  const total  = values.reduce((a, b) => a + b, 0);
+  const ctx    = document.getElementById("ov-nw-pie").getContext("2d");
+  if (ovNwPie) ovNwPie.destroy();
+  ovNwPie = new Chart(ctx, getPieCfg(labels, values, colors, total));
+}
+
+function renderLeaderboard(data) {
+  const container = document.getElementById("ov-leaderboard");
+  const emptyEl   = document.getElementById("ov-lb-empty");
+  const sorted    = [...data].sort((a, b) => {
+    const scoreA = a.net_worth ?? ((a.wallet ?? 0) + (a.bank ?? 0));
+    const scoreB = b.net_worth ?? ((b.wallet ?? 0) + (b.bank ?? 0));
+    return scoreB - scoreA;
+  });
+  const hasData = sorted.some(d => d.wallet != null || d.bank != null || d.net_worth != null);
+  if (!hasData) {
+    if (emptyEl) emptyEl.style.display = "";
+    container.querySelectorAll(".ov-lb-row").forEach(r => r.remove());
+    return;
+  }
+  if (emptyEl) emptyEl.style.display = "none";
+  container.querySelectorAll(".ov-lb-row").forEach(r => r.remove());
+  const frag = document.createDocumentFragment();
+  sorted.forEach((d, i) => {
+    const row = document.createElement("div");
+    row.className = "ov-lb-row" + (d.id === mothershipId ? " ov-lb-mothership" : "");
+    const online = document.querySelector(`.acct-tab[data-id="${d.id}"] .acct-dot.online`);
+    const dotHtml = `<span class="ov-lb-dot${online ? " online" : ""}"></span>`;
+    const crownHtml = d.id === mothershipId
+      ? `<svg class="ov-lb-crown" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 20h20M5 20 3 8l7 4 2-7 2 7 7-4-2 12"/></svg>`
+      : "";
+    const rankColor = i === 0 ? "ov-rank-gold" : i === 1 ? "ov-rank-silver" : i === 2 ? "ov-rank-bronze" : "";
+    row.innerHTML =
+      `<span class="ov-lb-rank ${rankColor}">${i + 1}</span>` +
+      `<span class="ov-lb-name">${dotHtml}${crownHtml}${escHtml(d.name)}</span>` +
+      `<span class="ov-lb-val">${d.wallet != null ? fmtCoins(d.wallet) : "—"}</span>` +
+      `<span class="ov-lb-val">${d.bank   != null ? fmtCoins(d.bank)   : "—"}</span>` +
+      `<span class="ov-lb-val ov-lb-nw">${d.net_worth != null ? fmtCoins(d.net_worth) : "—"}</span>` +
+      `<span class="ov-lb-time">${d.ts ? fmtTimeAgo(d.ts) : "—"}</span>`;
+    frag.appendChild(row);
+  });
+  container.appendChild(frag);
+}
+
+async function fetchOverview() {
+  if (!overviewActive) return;
+  try {
+    const res  = await fetch("/api/overview");
+    if (!res.ok) return;
+    const data = await res.json();
+
+    let totalWallet = 0, totalBank = 0, totalNw = 0, hasNw = false;
+    for (const d of data) {
+      totalWallet += d.wallet    ?? 0;
+      totalBank   += d.bank      ?? 0;
+      if (d.net_worth != null) { totalNw += d.net_worth; hasNw = true; }
+    }
+
+    const wEl  = document.getElementById("ov-total-wallet");
+    const bEl  = document.getElementById("ov-total-bank");
+    const nwEl = document.getElementById("ov-total-nw");
+    if (wEl)  wEl.textContent  = fmtCoins(totalWallet);
+    if (bEl)  bEl.textContent  = fmtCoins(totalBank);
+    if (nwEl) nwEl.textContent = hasNw ? fmtCoins(totalNw) : "—";
+
+    buildBalPie(data);
+    buildNwPie(data);
+    renderLeaderboard(data);
+  } catch {}
+}
+
+document.getElementById("ov-refresh-btn").addEventListener("click", fetchOverview);
 
 /* ── Boot ───────────────────────────────────────────── */
 async function boot() {

@@ -241,14 +241,26 @@
         Mothership Transfer <span class="section-sub">send resources to fleet command</span>
       </div>
       <div class="card transfer-card">
+        <div class="transfer-info-notice">
+          <svg class="icon" aria-hidden="true" style="flex-shrink:0;width:15px;height:15px"><use href="#icon-alert"/></svg>
+          <span>Pause any command handlers before transferring. When transferring items through the market, make sure to have enough coins for taxes.</span>
+        </div>
         <div class="transfer-btns">
           <button class="transfer-btn transfer-items-btn" id="transfer-items-btn">
             <svg class="icon" aria-hidden="true"><use href="#icon-list"/></svg>
-            Send Items to Mothership
+            Send Items (Friends Share)
+          </button>
+          <button class="transfer-btn transfer-market-btn" id="transfer-market-btn">
+            <svg class="icon" aria-hidden="true"><use href="#icon-crosshair"/></svg>
+            Send Items (Market Post)
           </button>
           <button class="transfer-btn transfer-coins-btn" id="transfer-coins-btn">
             <svg class="icon" aria-hidden="true"><use href="#icon-coins"/></svg>
             Send Coins to Mothership
+          </button>
+          <button class="transfer-btn transfer-market-coins-btn" id="transfer-market-coins-btn">
+            <svg class="icon" aria-hidden="true"><use href="#icon-coins"/></svg>
+            Send Coins (Market Post)
           </button>
         </div>
         <div class="transfer-status-bar" id="transfer-status-bar" style="display:none">
@@ -540,15 +552,21 @@
         <svg class="section-icon" aria-hidden="true"><use href="#icon-fish"/></svg>
         Fishing <span class="section-sub">pls fish catch</span>
       </div>
-      <div class="card fish-toggle-card">
-        <label class="fish-toggle-row" data-cmd="fish">
-          <div class="cmd-icon"><svg><use href="#icon-fish"/></svg></div>
-          <div class="cmd-info">
-            <span class="cmd-name">Enable Fishing</span>
-            <span class="cmd-code">Exclusive mode — pauses all other commands &amp; balance tracker</span>
+      <div class="card fish-card">
+
+        <!-- Toggle row -->
+        <div class="fish-toggle-row" data-cmd="fish">
+          <div class="fish-toggle-icon">
+            <svg width="18" height="18"><use href="#icon-fish"/></svg>
+          </div>
+          <div class="fish-toggle-info">
+            <span class="fish-toggle-name">Enable Fishing</span>
+            <span class="fish-toggle-desc">Exclusive mode · pauses all other commands &amp; balance tracker</span>
           </div>
           <div class="toggle" data-cmd="fish"><div class="toggle-thumb"></div></div>
-        </label>
+        </div>
+
+        <!-- Currency picker -->
         <div class="fish-currency-row" id="fish-currency-row">
           <span class="fish-currency-label">Sell bucket for</span>
           <div class="seg-group" id="fish-currency-seg">
@@ -556,42 +574,43 @@
             <button class="seg-btn" data-currency="tokens">Tokens</button>
           </div>
         </div>
-      </div>
 
-      <!-- Fishing Mode Notice -->
-      <div class="fish-exclusive-note" id="fish-exclusive-note" style="display:none">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-        Exclusive mode — all other commands and the balance tracker are paused while Fishing is active.
-      </div>
+        <!-- Live stats panel — shown when fishing is active -->
+        <div class="fish-live-panel" id="fish-status-card" style="display:none">
 
-      <!-- Fishing Status -->
-      <div class="section-title" id="fish-section-title" style="display:none">
-        <svg class="section-icon" aria-hidden="true"><use href="#icon-fish"/></svg>
-        Fishing <span class="section-sub">live stats</span>
-      </div>
-      <div class="card fish-status-card" id="fish-status-card" style="display:none">
-        <div class="fish-status-row">
-          <div class="fish-status-dot" id="fish-status-dot"></div>
-          <span class="fish-status-text" id="fish-status-text">Waiting to start...</span>
-          <button class="fish-reset-btn" id="fish-reset-btn" title="Reset session stats">Reset</button>
-        </div>
-        <div class="fish-stat-row">
-          <div class="fish-stat-card">
-            <div class="fish-stat-value" id="fish-catch-count">0</div>
-            <div class="fish-stat-label">Catches</div>
+          <!-- Exclusive warning -->
+          <div class="fish-exclusive-note" id="fish-exclusive-note">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            All other commands and the balance tracker are paused while Fishing is active.
           </div>
-          <div class="fish-stat-card">
-            <div class="fish-stat-value" id="fish-sell-count">0</div>
-            <div class="fish-stat-label">Bucket Sells</div>
-          </div>
-          <div class="fish-stat-card">
-            <div class="fish-stat-value" id="fish-session-time">0m</div>
-            <div class="fish-stat-label">Session</div>
+
+          <!-- Status bar + stats + chart -->
+          <div class="fish-live-body">
+            <div class="fish-status-row">
+              <div class="fish-status-dot" id="fish-status-dot"></div>
+              <span class="fish-status-text" id="fish-status-text">Waiting to start...</span>
+              <button class="fish-reset-btn" id="fish-reset-btn" title="Reset session stats">Reset</button>
+            </div>
+            <div class="fish-stat-row">
+              <div class="fish-stat-card">
+                <div class="fish-stat-value" id="fish-catch-count">0</div>
+                <div class="fish-stat-label">Catches</div>
+              </div>
+              <div class="fish-stat-card">
+                <div class="fish-stat-value" id="fish-sell-count">0</div>
+                <div class="fish-stat-label">Bucket Sells</div>
+              </div>
+              <div class="fish-stat-card">
+                <div class="fish-stat-value" id="fish-session-time">0m</div>
+                <div class="fish-stat-label">Session</div>
+              </div>
+            </div>
+            <div class="fish-chart-wrap" id="fish-chart-wrap">
+              <canvas id="fish-chart"></canvas>
+            </div>
           </div>
         </div>
-        <div class="fish-chart-wrap" id="fish-chart-wrap">
-          <canvas id="fish-chart"></canvas>
-        </div>
+
       </div>
     </div>
 
@@ -755,6 +774,13 @@
               </div>
             </div>
           </div>
+          <div class="adv-mode-row">
+            <button class="adv-mode-btn active" id="adv-mode-recommended" data-mode="recommended">Recommended</button>
+            <button class="adv-mode-btn" id="adv-mode-custom" data-mode="custom">Custom</button>
+          </div>
+          <div class="adv-custom-panel" id="adv-custom-panel">
+            <div class="adv-custom-list" id="adv-custom-list"></div>
+          </div>
           <div class="adv-info-row">
             <svg class="adv-info-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
             Cooldown is calculated automatically after each run based on interaction count.
@@ -774,6 +800,21 @@
               <button class="seg-btn" data-type="search" data-level="low">Low</button>
               <button class="seg-btn" data-type="search" data-level="medium">Medium</button>
               <button class="seg-btn" data-type="search" data-level="high">High</button>
+              <button class="seg-btn" data-type="search" data-level="custom">Custom</button>
+            </div>
+          </div>
+          <div class="risk-custom-panel" id="search-custom-panel">
+            <div class="risk-custom-head">
+              <span class="risk-custom-title">Custom Search Order</span>
+              <span class="risk-custom-hint">Drag to reorder · top = most preferred</span>
+            </div>
+            <div class="rank-list" id="search-rank-list"></div>
+            <div class="risk-custom-footer">
+              <span class="risk-custom-count" id="search-custom-count"></span>
+              <div class="risk-custom-actions">
+                <button class="risk-custom-reset" id="search-custom-reset">Reset to Medium</button>
+                <button class="risk-custom-save" id="search-custom-save">Save</button>
+              </div>
             </div>
           </div>
           <div class="risk-divider"></div>
@@ -783,6 +824,21 @@
               <button class="seg-btn" data-type="crime" data-level="low">Low</button>
               <button class="seg-btn" data-type="crime" data-level="medium">Medium</button>
               <button class="seg-btn" data-type="crime" data-level="high">High</button>
+              <button class="seg-btn" data-type="crime" data-level="custom">Custom</button>
+            </div>
+          </div>
+          <div class="risk-custom-panel" id="crime-custom-panel">
+            <div class="risk-custom-head">
+              <span class="risk-custom-title">Custom Crime Order</span>
+              <span class="risk-custom-hint">Drag to reorder · top = most preferred</span>
+            </div>
+            <div class="rank-list" id="crime-rank-list"></div>
+            <div class="risk-custom-footer">
+              <span class="risk-custom-count" id="crime-custom-count"></span>
+              <div class="risk-custom-actions">
+                <button class="risk-custom-reset" id="crime-custom-reset">Reset to Medium</button>
+                <button class="risk-custom-save" id="crime-custom-save">Save</button>
+              </div>
             </div>
           </div>
         </div>
@@ -858,10 +914,81 @@
   </div>
 </main>
 
+<!-- Overview Panel -->
+<div id="overview-panel" class="main" style="display:none">
+  <div class="container">
+
+    <div class="desk-full">
+      <div class="section-title">
+        <svg class="section-icon" aria-hidden="true"><use href="#icon-activity"/></svg>
+        Fleet Overview <span class="section-sub">all accounts combined</span>
+        <button class="section-reset-btn" id="ov-refresh-btn" style="border-color:transparent">↻ Refresh</button>
+      </div>
+    </div>
+
+    <div class="desk-full">
+      <div class="ov-stats-row">
+        <div class="card ov-stat-card">
+          <div class="ov-stat-label">Total Wallet</div>
+          <div class="ov-stat-value" id="ov-total-wallet">—</div>
+        </div>
+        <div class="card ov-stat-card">
+          <div class="ov-stat-label">Total Bank</div>
+          <div class="ov-stat-value" id="ov-total-bank">—</div>
+        </div>
+        <div class="card ov-stat-card">
+          <div class="ov-stat-label">Total Net Worth</div>
+          <div class="ov-stat-value" id="ov-total-nw">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="desk-full">
+      <div class="ov-charts-row">
+        <div class="card ov-chart-card">
+          <div class="ov-chart-title">Balance by Account</div>
+          <div class="ov-chart-wrap" id="ov-bal-pie-wrap">
+            <canvas id="ov-balance-pie"></canvas>
+          </div>
+          <div class="ov-chart-empty hidden" id="ov-bal-empty">No balance data yet</div>
+        </div>
+        <div class="card ov-chart-card">
+          <div class="ov-chart-title">Net Worth by Account</div>
+          <div class="ov-chart-wrap" id="ov-nw-pie-wrap">
+            <canvas id="ov-nw-pie"></canvas>
+          </div>
+          <div class="ov-chart-empty hidden" id="ov-nw-empty">No net worth data yet</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="desk-full">
+      <div class="section-title">
+        <svg class="section-icon" aria-hidden="true"><use href="#icon-trending-up"/></svg>
+        Account Leaderboard <span class="section-sub">ranked by net worth</span>
+      </div>
+      <div class="card ov-lb-card">
+        <div class="ov-lb-header">
+          <span class="ov-lb-rank">#</span>
+          <span class="ov-lb-name">Account</span>
+          <span class="ov-lb-val">Wallet</span>
+          <span class="ov-lb-val">Bank</span>
+          <span class="ov-lb-val">Net Worth</span>
+          <span class="ov-lb-time">Updated</span>
+        </div>
+        <div id="ov-leaderboard">
+          <div class="ov-lb-empty" id="ov-lb-empty">No data yet — enable Balance Tracker on accounts</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
 <!-- Add Account Modal -->
 <div class="modal-overlay" id="modal-overlay" style="display:none">
   <div class="modal-box">
-    <div class="modal-header">
+    <div class="modal-head">
       <span class="modal-title">Add Account</span>
       <button class="modal-close" id="modal-close" aria-label="Close">
         <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
@@ -886,8 +1013,8 @@
       </div>
     </div>
     <div class="modal-footer">
-      <button class="modal-btn modal-cancel-btn" id="modal-cancel">Cancel</button>
-      <button class="modal-btn modal-confirm-btn" id="modal-confirm">Add Account</button>
+      <button class="modal-btn-cancel" id="modal-cancel">Cancel</button>
+      <button class="modal-btn-confirm" id="modal-confirm">Add Account</button>
     </div>
   </div>
 </div>
