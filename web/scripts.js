@@ -78,7 +78,7 @@ function getAcctState(id) {
     acctState[id] = {
       logSince: 0, logEntries: [], logFilter: "all",
       logAutoScroll: true, logCleared: false, clearedBefore: 0,
-      cmdEnabled: { hunt:true, dig:true, search:true, beg:true, crime:true, hl:true, pm:true, adv:false },
+      cmdEnabled: { hunt:true, dig:true, search:true, beg:true, crime:true, hl:true, pm:true, adv:false, daily:false, work:false, deposit:false, trivia:false, stream:false, pet:false },
       searchRisk: "medium", crimeRisk: "medium",
     };
   }
@@ -735,6 +735,9 @@ function switchAccount(id) {
     cooldown: 20, search_cooldown: 25, beg_cooldown: 40,
     crime_cooldown: 40, hl_cooldown: 10, hl_wait_for: 5,
     pm_cooldown: 20, wait_for_response: 10,
+    daily_cooldown: 86400, work_cooldown: 3600,
+    deposit_cooldown: 60, trivia_cooldown: 10,
+    stream_cooldown: 660, pet_cooldown: 1800,
   };
   const merged = { ...DEFAULTS, ...acc };
   document.querySelectorAll("[data-config]").forEach(el => {
@@ -742,13 +745,14 @@ function switchAccount(id) {
     if (v !== undefined) el.value = v;
   });
 
-  applyRisk("search", acc.search_risk || "medium");
-  applyRisk("crime",  acc.crime_risk  || "medium");
+  applyRisk("search", acc.search_risk || "medium", false);
+  applyRisk("crime",  acc.crime_risk  || "medium", false);
   populateCustomRanking("search", acc.search_custom_ranking || []);
   populateCustomRanking("crime",  acc.crime_custom_ranking  || []);
 
   const cmds = acc.commands_enabled || {};
-  ["hunt","dig","search","beg","crime","hl","pm","adv","fish"].forEach(cmd => {
+  ["hunt","dig","search","beg","crime","hl","pm","adv","fish",
+   "daily","work","deposit","trivia","stream","pet"].forEach(cmd => {
     applyToggle(cmd, cmds[cmd] === true);
   });
 
@@ -974,6 +978,7 @@ setupReveal("m-token",    "m-reveal",    "m-eye-icon");
 /* ── Toggle helpers ─────────────────────────────────── */
 const cmdState = {
   hunt:true, dig:true, search:true, beg:true, crime:true, hl:true, pm:true, adv:false, fish:false,
+  daily:false, work:false, deposit:false, trivia:false, stream:false, pet:false,
 };
 
 function applyToggle(cmd, enabled) {
@@ -1367,7 +1372,54 @@ function populateCustomRanking(type, ranking) {
   buildRankList(type, ranking);
 }
 
-function applyRisk(type, level) {
+/* ── Liquid-glass sliding pill for seg controls ─────── */
+function updateSegPill(seg, level, animate) {
+  const activeBtn = seg.querySelector(`[data-level="${level}"]`);
+  if (!activeBtn) return;
+
+  const colorMap = {
+    low:    ["rgba(48,209,88,0.20)",  "rgba(48,209,88,0.28)"],
+    medium: ["rgba(255,196,10,0.22)", "rgba(255,196,10,0.26)"],
+    high:   ["rgba(255,69,58,0.20)",  "rgba(255,69,58,0.26)"],
+    custom: ["rgba(10,132,255,0.18)", "rgba(10,132,255,0.24)"]
+  };
+  const [color, glow] = colorMap[level] || colorMap.low;
+
+  if (!animate) {
+    seg.classList.add("pill-no-transition");
+  }
+
+  // offsetLeft/offsetWidth are always relative to the positioned .seg ancestor
+  // — unlike getBoundingClientRect() they don't return 0 before first paint
+  const left  = activeBtn.offsetLeft;
+  const width = activeBtn.offsetWidth;
+  // Retry once if layout hasn't happened yet
+  if (width === 0) {
+    setTimeout(() => updateSegPill(seg, level, false), 60);
+    return;
+  }
+  seg.style.setProperty("--pill-left",  `${left}px`);
+  seg.style.setProperty("--pill-width", `${width}px`);
+  seg.style.setProperty("--pill-color", color);
+  seg.style.setProperty("--pill-glow",  glow);
+  seg.classList.add("has-pill");
+
+  if (animate) {
+    seg.classList.remove("pill-sheen");
+    void seg.offsetWidth; // force reflow to restart animation
+    seg.classList.add("pill-sheen");
+    const onEnd = () => { seg.classList.remove("pill-sheen"); seg.removeEventListener("animationend", onEnd); };
+    seg.addEventListener("animationend", onEnd);
+  }
+
+  if (!animate) {
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => seg.classList.remove("pill-no-transition"))
+    );
+  }
+}
+
+function applyRisk(type, level, animate = true) {
   const group = document.getElementById(`risk-${type}`);
   if (!group) return;
   group.querySelectorAll(".seg-btn").forEach(btn => {
@@ -1376,6 +1428,8 @@ function applyRisk(type, level) {
   });
   const panel = document.getElementById(`${type}-custom-panel`);
   if (panel) panel.classList.toggle("open", level === "custom");
+
+  requestAnimationFrame(() => updateSegPill(group, level, animate));
 }
 
 /* ── Command toggle clicks ──────────────────────────── */
@@ -1387,7 +1441,7 @@ document.querySelectorAll(".cmd-card, .fish-toggle-row").forEach(card => {
     if (cmd === "fish") {
       if (newVal) {
         // Exclusive ON: disable all other commands + bal tracker
-        const OTHER_CMDS = ["hunt","dig","search","beg","crime","hl","pm","adv"];
+        const OTHER_CMDS = ["hunt","dig","search","beg","crime","hl","pm","adv","daily","work","deposit","trivia","stream","pet"];
         OTHER_CMDS.forEach(c => applyToggle(c, false));
         applyToggle("fish", true);
         applyFishUI(true);
