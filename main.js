@@ -42,7 +42,6 @@ const _cfg = {
     beg_cooldown:      config.beg_cooldown      ?? 40,
     crime_cooldown:    config.crime_cooldown    ?? 40,
     hl_cooldown:       config.hl_cooldown       ?? 10,
-    hl_wait_for:       config.hl_wait_for       ?? 5,
     pm_cooldown:       config.pm_cooldown       ?? 20,
     adv_cooldown:      config.adv_cooldown      ?? 1800,
     wait_for_response: config.wait_for_response ?? 10,
@@ -63,9 +62,17 @@ const _cfg = {
     market_sniper_enabled:   config.market_sniper_enabled   ?? false,
     market_sniper_items:     config.market_sniper_items     ?? [],
     market_sniper_cooldown:  config.market_sniper_cooldown  ?? 60,
+    daily_cooldown:   config.daily_cooldown   ?? 86400,
+    work_cooldown:    config.work_cooldown    ?? 3600,
+    deposit_cooldown: config.deposit_cooldown ?? 60,
+    trivia_cooldown:  config.trivia_cooldown  ?? 10,
+    stream_cooldown:  config.stream_cooldown  ?? 660,
+    pet_cooldown:     config.pet_cooldown     ?? 1800,
     commands_enabled:  config.commands_enabled  ?? {
         hunt: true, dig: true, search: true,
         beg: true, crime: true, hl: true, pm: true, adv: false,
+        fish: false, daily: false, work: false, deposit: false,
+        trivia: false, stream: false, pet: false,
     },
 };
 
@@ -81,10 +88,12 @@ async function configReloadLoop() {
             const fresh = loadAccountConfig();
             for (const key of [
                 'cooldown', 'search_cooldown', 'beg_cooldown', 'crime_cooldown',
-                'hl_cooldown', 'hl_wait_for', 'pm_cooldown', 'wait_for_response',
+                'hl_cooldown', 'pm_cooldown', 'wait_for_response',
                 'search_risk', 'crime_risk', 'adv_cooldown', 'adv_type', 'fish_sell_currency', 'disable_interaction_lock',
                 'limit_flags', 'stealth_mode', 'cycle_uptime_mins', 'cycle_downtime_mins',
                 'market_sniper_enabled', 'market_sniper_cooldown',
+                'daily_cooldown', 'work_cooldown', 'deposit_cooldown',
+                'trivia_cooldown', 'stream_cooldown', 'pet_cooldown',
             ]) {
                 if (key in fresh && _cfg[key] !== fresh[key]) {
                     log('info', `Hot-reload ${key}: ${_cfg[key]} → ${fresh[key]}`);
@@ -270,8 +279,14 @@ function pickSafeColumn(hazardCol) {
 async function clickButton(message, label) {
     for (const button of getButtons(message)) {
         if (button.label === label) {
-            try { await message.clickButton(button.customId); } catch (e) { log('warn', `Click '${label}': ${e.message}`); }
-            return true;
+            for (let attempt = 0; attempt < 2; attempt++) {
+                try { await message.clickButton(button.customId); return true; }
+                catch (e) {
+                    if (attempt === 0) { log('warn', `[RETRY] '${label}': ${e.message} — retrying in 2s`); await sleep(2000); }
+                    else { log('warn', `Click '${label}': ${e.message}`); }
+                }
+            }
+            return false;
         }
     }
     return false;
@@ -281,11 +296,25 @@ async function clickButtonPrefix(message, prefix) {
     const lower = prefix.toLowerCase();
     for (const button of getButtons(message)) {
         if ((button.label || '').toLowerCase().startsWith(lower)) {
-            try { await message.clickButton(button.customId); } catch (e) { log('warn', `Click prefix '${prefix}': ${e.message}`); }
-            return button.label;
+            for (let attempt = 0; attempt < 2; attempt++) {
+                try { await message.clickButton(button.customId); return button.label; }
+                catch (e) {
+                    if (attempt === 0) { log('warn', `[RETRY] prefix '${prefix}': ${e.message} — retrying in 2s`); await sleep(2000); }
+                    else { log('warn', `Click prefix '${prefix}': ${e.message}`); }
+                }
+            }
+            return null;
         }
     }
     return null;
+}
+
+function isPremiumCooldown(msg) {
+    if (!msg) return false;
+    for (const embed of (msg.embeds || [])) {
+        if (/premium.*cooldown|cooldown is/i.test(embed.description || '')) return true;
+    }
+    return false;
 }
 
 async function handleDodge(message, hazard, label) {
@@ -303,17 +332,25 @@ async function handleDodge(message, hazard, label) {
 // cross-bot stealing because no two bots share the same sent message ID.
 const _pendingReplies = new Map(); // sentMsgId -> { resolve, command }
 
+// Buffer for replies that land between channel.send() returning and
+// _pendingReplies.set() running (race window across an await boundary).
+const _earlyReplies = new Map(); // sentMsgId -> Message
+
 client.on('messageCreate', message => {
     if (String(message.channelId) !== CHANNEL_ID) return;
     if (String(message.author.id) !== BOT_ID)     return;
     if (!message.reference)                        return;
 
-    const refId = message.reference.messageId;
-    if (!_pendingReplies.has(refId)) return;
-
-    const { resolve } = _pendingReplies.get(refId);
-    _pendingReplies.delete(refId);
-    resolve(message);
+    const refId = String(message.reference.messageId);
+    if (_pendingReplies.has(refId)) {
+        const { resolve } = _pendingReplies.get(refId);
+        _pendingReplies.delete(refId);
+        resolve(message);
+        return;
+    }
+    // Reply arrived before sendAndWait registered — park it briefly
+    _earlyReplies.set(refId, message);
+    setTimeout(() => _earlyReplies.delete(refId), 5000);
 });
 
 // ── Stealth mode presets ─────────────────────────────────────
@@ -354,6 +391,11 @@ function humanJitter(baseMs) {
     return baseMs + Math.floor((Math.random() ** m.biasPow) * maxExtra);
 }
 
+// Returns jitter-applied cooldown in ms for a given config key
+function cd(key) {
+    return humanJitter(_cfg[key] * 1000);
+}
+
 async function stealthSendDelay(channel) {
     if (!_cfg.limit_flags) return;
     const m = _stealthMode();
@@ -381,19 +423,52 @@ async function sendAndWait(channel, command, timeoutSecs = null) {
 
     // Send first so we have the actual Discord message ID to key on
     const sent = await channel.send(command);
+    const sentId = String(sent.id);
     log('info', `Sent: ${command}`);
-    _pendingReplies.set(sent.id, { resolve, command });
+    _pendingReplies.set(sentId, { resolve, command });
+
+    // Race-condition check: reply may have arrived in the await gap above and
+    // been buffered by the messageCreate handler before we registered the key.
+    if (_earlyReplies.has(sentId)) {
+        const early = _earlyReplies.get(sentId);
+        _earlyReplies.delete(sentId);
+        _pendingReplies.delete(sentId);
+        if (early) logMessage(early);
+        return early;
+    }
+
+    // Raw fallback — discord.js occasionally drops messageCreate events under
+    // load. Listening on the raw gateway packet catches what the high-level
+    // emitter misses, matching the same pattern used by waitForEdit().
+    async function rawFallback(packet) {
+        if (packet.t !== 'MESSAGE_CREATE') return;
+        if (String(packet.d.channel_id) !== String(CHANNEL_ID)) return;
+        if (String(packet.d.author?.id)  !== String(BOT_ID))    return;
+        // Guard: raw gateway may send message_id as string or number — normalise both
+        const rawRefId = String(packet.d.message_reference?.message_id ?? '');
+        if (!rawRefId || rawRefId !== sentId) return;
+        try {
+            const msg = await channel.messages.fetch(packet.d.id, { force: true });
+            if (!_pendingReplies.has(sentId)) return; // messageCreate already resolved it
+            const { resolve: res } = _pendingReplies.get(sentId);
+            _pendingReplies.delete(sentId);
+            res(msg);
+        } catch {}
+    }
+    client.on('raw', rawFallback);
 
     const timer = setTimeout(() => {
-        if (_pendingReplies.has(sent.id)) {
-            _pendingReplies.delete(sent.id);
+        if (_pendingReplies.has(sentId)) {
+            _pendingReplies.delete(sentId);
             log('warn', `No response for '${command}' within ${timeoutSecs ?? _cfg.wait_for_response}s`);
             resolve(null);
         }
+        client.off('raw', rawFallback);
     }, ms);
 
     const response = await promise;
     clearTimeout(timer);
+    client.off('raw', rawFallback); // clean up whether messageCreate or raw resolved it
     if (response) logMessage(response);
     return response;
 }
@@ -1336,23 +1411,51 @@ client.on('ready', async () => {
     }
 
     // ── Uptime / Downtime cycle ──────────────────────────────
+    // Polls every 5 s so config changes (disable, duration edits) take effect
+    // within one polling tick instead of waiting for a full sleep to expire.
     async function cycleLoop() {
         while (true) {
-            await sleep(5000);
             const up   = _cfg.cycle_uptime_mins;
             const down = _cfg.cycle_downtime_mins;
-            if (!_cfg.limit_flags || !up || !down) { setPaused(false); continue; }
 
+            // Cycle disabled — keep bot unpaused and re-check shortly
+            if (!_cfg.limit_flags || !up || !down) {
+                if (_botPaused) setPaused(false);
+                await sleep(5000);
+                continue;
+            }
+
+            // === UPTIME ===
+            // Unpause immediately — no 5 s gap at the top of the loop
             setPaused(false);
             log('info', `[CYCLE] Uptime started — active for ${up}min`);
-            await sleep(up * 60000);
+            const uptimeEnd = Date.now() + up * 60000;
+            while (Date.now() < uptimeEnd) {
+                await sleep(5000);
+                // Cycle disabled mid-uptime — exit early, skip downtime
+                if (!_cfg.limit_flags || !_cfg.cycle_uptime_mins || !_cfg.cycle_downtime_mins) break;
+            }
 
-            // re-check in case config changed mid-sleep
-            if (!_cfg.limit_flags || !_cfg.cycle_uptime_mins || !_cfg.cycle_downtime_mins) continue;
+            // Re-check: if cycle was turned off during uptime, stay unpaused
+            if (!_cfg.limit_flags || !_cfg.cycle_uptime_mins || !_cfg.cycle_downtime_mins) {
+                if (_botPaused) setPaused(false);
+                continue;
+            }
 
+            // === DOWNTIME ===
             setPaused(true);
-            log('info', `[CYCLE] Downtime started — resting for ${down}min`);
-            await sleep(down * 60000);
+            const downMins = _cfg.cycle_downtime_mins;
+            log('info', `[CYCLE] Downtime started — resting for ${downMins}min`);
+            const downtimeEnd = Date.now() + downMins * 60000;
+            while (Date.now() < downtimeEnd) {
+                await sleep(5000);
+                // Cycle disabled mid-downtime — unpause immediately
+                if (!_cfg.limit_flags || !_cfg.cycle_uptime_mins || !_cfg.cycle_downtime_mins) {
+                    setPaused(false);
+                    break;
+                }
+            }
+            // Loop continues straight into next uptime — no extra sleep gap
         }
     }
 
@@ -1364,8 +1467,7 @@ client.on('ready', async () => {
                     await sendAndWait(channel, 'pls beg');
                 });
             }
-            const ms = _cfg.limit_flags ? humanJitter(_cfg.beg_cooldown * 1000) : _cfg.beg_cooldown * 1000;
-            await sleep(ms);
+            await sleep(cd('beg_cooldown'));
         }
     }
 
@@ -1377,18 +1479,18 @@ client.on('ready', async () => {
                 await runWithLock(async () => {
                     const res = await sendAndWait(channel, 'pls search');
                     if (res) {
+                        if (isPremiumCooldown(res)) { log('warn', '[SEARCH] Premium cooldown — skipping'); return; }
                         const btns   = getButtons(res);
                         const target = btns.length ? (pickBestSearchButton(btns) || btns[0]) : null;
                         if (target) {
                             log('info', `[SEARCH] Clicking '${target.label}'`);
-                            try { await res.clickButton(target.customId); log('info', `[SEARCH] ✓ Clicked '${target.label}'`); }
-                            catch (e) { log('warn', `[SEARCH] ${e.message}`); }
+                            const ok = await clickButton(res, target.label);
+                            log(ok ? 'info' : 'warn', ok ? `[SEARCH] ✓ Clicked '${target.label}'` : `[SEARCH] ✗ Failed to click '${target.label}'`);
                         }
                     }
                 });
             }
-            const ms = _cfg.limit_flags ? humanJitter(_cfg.search_cooldown * 1000) : _cfg.search_cooldown * 1000;
-            await sleep(ms);
+            await sleep(cd('search_cooldown'));
         }
     }
 
@@ -1400,14 +1502,14 @@ client.on('ready', async () => {
                 await runWithLock(async () => {
                     const res = await sendAndWait(channel, 'pls dig');
                     if (res) {
+                        if (isPremiumCooldown(res)) { log('warn', '[DIG] Premium cooldown — skipping'); return; }
                         const desc = res.embeds[0]?.description || '';
                         if (desc.includes('Dodge the Moleman'))     await handleDodge(res, 'Worm',     'MOLEMAN');
                         else if (desc.includes('Dodge the Sludge')) await handleDodge(res, 'PinkBits', 'SLUDGE');
                     }
                 });
             }
-            const ms = _cfg.limit_flags ? humanJitter(_cfg.cooldown * 1000) : _cfg.cooldown * 1000;
-            await sleep(ms);
+            await sleep(cd('cooldown'));
         }
     }
 
@@ -1419,13 +1521,13 @@ client.on('ready', async () => {
                 await runWithLock(async () => {
                     const res = await sendAndWait(channel, 'pls hunt');
                     if (res) {
+                        if (isPremiumCooldown(res)) { log('warn', '[HUNT] Premium cooldown — skipping'); return; }
                         const desc = res.embeds[0]?.description || '';
                         if (desc.includes('Dodge the Dragon')) await handleDodge(res, 'FireBall', 'FIREBALL');
                     }
                 });
             }
-            const ms = _cfg.limit_flags ? humanJitter(_cfg.cooldown * 1000) : _cfg.cooldown * 1000;
-            await sleep(ms);
+            await sleep(cd('cooldown'));
         }
     }
 
@@ -1437,18 +1539,18 @@ client.on('ready', async () => {
                 await runWithLock(async () => {
                     const res = await sendAndWait(channel, 'pls crime');
                     if (res) {
+                        if (isPremiumCooldown(res)) { log('warn', '[CRIME] Premium cooldown — skipping'); return; }
                         const btns   = getButtons(res);
                         const target = btns.length ? (pickBestCrimeButton(btns) || btns[0]) : null;
                         if (target) {
                             log('info', `[CRIME] Clicking '${target.label}'`);
-                            try { await res.clickButton(target.customId); log('info', `[CRIME] ✓ Clicked '${target.label}'`); }
-                            catch (e) { log('warn', `[CRIME] ${e.message}`); }
+                            const ok = await clickButton(res, target.label);
+                            log(ok ? 'info' : 'warn', ok ? `[CRIME] ✓ Clicked '${target.label}'` : `[CRIME] ✗ Failed to click '${target.label}'`);
                         }
                     }
                 });
             }
-            const ms = _cfg.limit_flags ? humanJitter(_cfg.crime_cooldown * 1000) : _cfg.crime_cooldown * 1000;
-            await sleep(ms);
+            await sleep(cd('crime_cooldown'));
         }
     }
 
@@ -1458,8 +1560,9 @@ client.on('ready', async () => {
             if (_botPaused) { await sleep(5000); continue; }
             if (_cfg.commands_enabled.hl) {
                 await runWithLock(async () => {
-                    const res = await sendAndWait(channel, 'pls hl', _cfg.hl_wait_for);
+                    const res = await sendAndWait(channel, 'pls hl', _cfg.wait_for_response);
                     if (res) {
+                        if (isPremiumCooldown(res)) { log('warn', '[HL] Premium cooldown — skipping'); return; }
                         const desc  = res.embeds[0]?.description || '';
                         const match = desc.match(/\*\*(\d+)\*\*/);
                         if (match) {
@@ -1474,8 +1577,7 @@ client.on('ready', async () => {
                     }
                 });
             }
-            const ms = _cfg.limit_flags ? humanJitter(_cfg.hl_cooldown * 1000) : _cfg.hl_cooldown * 1000;
-            await sleep(ms);
+            await sleep(cd('hl_cooldown'));
         }
     }
 
@@ -1490,6 +1592,7 @@ client.on('ready', async () => {
                 await runWithLock(async () => {
                     const res = await sendAndWait(channel, 'pls pm');
                     if (res) {
+                        if (isPremiumCooldown(res)) { log('warn', '[PM] Premium cooldown — skipping'); return; }
                         const menuRows = getMenuRows(res);
                         log('info', `[PM] Found ${menuRows.length} menu(s), platform='${platform}'`);
                         if (menuRows.length > 0) {
@@ -1537,8 +1640,7 @@ client.on('ready', async () => {
                 continue;
             }
             let advCooldown = _cfg.adv_cooldown;
-            if (_cfg.commands_enabled.adv) {
-                await runWithLock(async () => {
+            await runWithLock(async () => {
                     const advType = _cfg.adv_type;
                     log('info', `[ADV] Starting adventure: "${advType}"`);
 
@@ -1739,8 +1841,7 @@ client.on('ready', async () => {
                     }
                     advCooldown += 60;
                     log('info', `[ADV] Cooldown: ${Math.round(advCooldown / 60)}min (includes +60s buffer)`);
-                });
-            }
+            });
             await sleep(advCooldown * 1000);
         }
     }
@@ -1758,6 +1859,7 @@ client.on('ready', async () => {
                 // Step 1: send pls fish catch
                 const res = await sendAndWait(channel, 'pls fish catch', 15);
                 if (!res) { log('warn', '[FISH] No response to pls fish catch'); return; }
+                if (isPremiumCooldown(res)) { log('warn', '[FISH] Premium cooldown — skipping'); return; }
 
                 // Step 2: find "Go Fishing" button (Components V2 aware)
                 const goBtn = findButtonDeep(res.components, 'Go Fishing');
@@ -2314,12 +2416,522 @@ client.on('ready', async () => {
         });
     }
 
+    // ── Daily reward loop ──────────────────────────────────────────────
+    async function dailyLoop() {
+        await sleep(25000);
+        let _dailyNextAt = 0; // track when next claim is available
+        while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
+            if (_cfg.commands_enabled?.daily) {
+                // honour the next-available timestamp if we know it
+                if (_dailyNextAt > Date.now()) {
+                    await sleep(Math.min(_dailyNextAt - Date.now() + 5000, 30000));
+                    continue;
+                }
+                await runWithLock(async () => {
+                    const res = await sendAndWait(channel, 'pls daily', 12);
+                    if (!res) { log('warn', '[DAILY] No response'); return; }
+                    if (isPremiumCooldown(res)) { log('warn', '[DAILY] Premium cooldown — skipping'); return; }
+
+                    const embed = res.embeds[0]?.toJSON?.() || res.embeds[0] || {};
+                    const desc  = embed.description || '';
+
+                    // Already claimed — parse the time remaining and back off precisely
+                    const alreadyMatch = desc.match(/(\d+)\s*hour/i) || desc.match(/(\d+)\s*hr/i);
+                    if (alreadyMatch || desc.toLowerCase().includes('already') || desc.toLowerCase().includes('come back')) {
+                        const hrs = alreadyMatch ? parseInt(alreadyMatch[1]) : 23;
+                        _dailyNextAt = Date.now() + hrs * 3600 * 1000;
+                        log('info', `[DAILY] Already claimed — next in ~${hrs}h`);
+                        return;
+                    }
+
+                    // Parse streak and reward for the log
+                    const streakMatch = desc.match(/streak[^*]*\*{1,2}(\d+)\*{1,2}/i);
+                    const coinMatch   = desc.match(/⏣\s*([\d,]+)/);
+                    const streak = streakMatch ? streakMatch[1] : '?';
+                    const coins  = coinMatch   ? coinMatch[1]   : '?';
+                    log('info', `[DAILY] ✓ Claimed — streak ${streak} | +⏣${coins}`);
+
+                    // Click any confirmation button (some daily responses have one)
+                    await sleep(800 + Math.random() * 600);
+                    const confirmBtn = getButtons(res).find(b => /claim|collect|ok/i.test(b.label || ''));
+                    if (confirmBtn) {
+                        await clickButton(res, confirmBtn.label);
+                    }
+                    _dailyNextAt = Date.now() + 23 * 3600 * 1000;
+                });
+            }
+            await sleep(cd('daily_cooldown'));
+        }
+    }
+
+    // ── Work shift loop ────────────────────────────────────────────────
+    async function workLoop() {
+        await sleep(28000);
+        while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
+            if (_cfg.commands_enabled?.work) {
+                await runWithLock(async () => {
+                    const res = await sendAndWait(channel, 'pls work shift', 12);
+                    if (!res) { log('warn', '[WORK] No response'); return; }
+                    if (isPremiumCooldown(res)) { log('warn', '[WORK] Premium cooldown — skipping'); return; }
+
+                    const embed = res.embeds[0]?.toJSON?.() || res.embeds[0] || {};
+                    const desc  = embed.description || '';
+
+                    // Already working — detect and wait it out
+                    if (desc.toLowerCase().includes('already working') || desc.toLowerCase().includes('still on shift')) {
+                        log('info', '[WORK] Still on shift — will retry later');
+                        return;
+                    }
+
+                    const btns = getButtons(res);
+                    if (!btns.length) {
+                        log('info', '[WORK] ✓ Shift started (no button response)');
+                        return;
+                    }
+
+                    // Simulate reading the available shifts before picking one
+                    await sleep(1200 + Math.random() * 1800);
+
+                    // Prefer shifts that mention higher-value keywords, otherwise random
+                    const preferred = btns.find(b => /overtime|bonus|double/i.test(b.label || ''));
+                    const pick      = preferred || btns[Math.floor(Math.random() * btns.length)];
+                    log('info', `[WORK] Starting shift: '${pick.label}'`);
+                    const shiftOk = await clickButton(res, pick.label);
+                    if (!shiftOk) log('warn', '[WORK] Shift click failed after retry');
+                });
+            }
+            await sleep(cd('work_cooldown'));
+        }
+    }
+
+    // ── Deposit-all loop ───────────────────────────────────────────────
+    async function depositLoop() {
+        await sleep(31000);
+        while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
+            if (_cfg.commands_enabled?.deposit) {
+                await runWithLock(async () => {
+                    // Check wallet first — no point depositing nothing
+                    const walletRes = await sendAndWait(channel, 'pls bal', 8);
+                    if (walletRes) {
+                        const walletDesc = walletRes.embeds[0]?.description || walletRes.content || '';
+                        const walletMatch = walletDesc.match(/wallet[^\d]*([\d,]+)/i);
+                        const walletAmt   = walletMatch ? parseInt(walletMatch[1].replace(/,/g, '')) : -1;
+                        if (walletAmt === 0) { log('info', '[DEPOSIT] Wallet empty — nothing to deposit'); return; }
+                        if (walletAmt > 0) log('info', `[DEPOSIT] Wallet: ⏣${walletMatch[1]} — depositing`);
+                    }
+
+                    await sleep(600 + Math.random() * 800);
+                    const res = await sendAndWait(channel, 'pls dep max', 8);
+                    if (!res) { log('warn', '[DEPOSIT] No response'); return; }
+
+                    const depDesc = res.embeds[0]?.description || res.content || '';
+                    const depMatch = depDesc.match(/⏣\s*([\d,]+)/);
+                    log('info', `[DEPOSIT] ✓ Deposited${depMatch ? ' ⏣' + depMatch[1] : ''}`);
+                });
+            }
+            await sleep(cd('deposit_cooldown'));
+        }
+    }
+
+    // ── Trivia loop (with persistent answer cache) ─────────────────────
+    const TRIVIA_CACHE_PATH = path.join(__dirname, `trivia_cache_${ACCOUNT_ID}.json`);
+    let _triviaCache = {};
+    try { _triviaCache = JSON.parse(fs.readFileSync(TRIVIA_CACHE_PATH, 'utf8')); } catch {}
+    function saveTriviaCache() {
+        try { fs.writeFileSync(TRIVIA_CACHE_PATH, JSON.stringify(_triviaCache, null, 2)); } catch {}
+    }
+
+    async function triviaLoop() {
+        await sleep(34000);
+        while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
+            if (_cfg.commands_enabled?.trivia) {
+                await runWithLock(async () => {
+                    const res = await sendAndWait(channel, 'pls trivia', 12);
+                    if (!res) { log('warn', '[TRIVIA] No response'); return; }
+                    if (isPremiumCooldown(res)) { log('warn', '[TRIVIA] Premium cooldown — skipping'); return; }
+
+                    const embed    = res.embeds[0]?.toJSON?.() || res.embeds[0] || {};
+                    const desc     = embed.description || '';
+                    const fields   = embed.fields || [];
+                    const question = desc.match(/\*\*(.*?)\*\*/)?.[1] || '';
+                    const category = fields[1]?.value || fields[0]?.value || '';
+                    const cacheKey = `${category}::${question}`;
+                    const btns     = getButtons(res);
+                    if (!btns.length) { log('warn', '[TRIVIA] No buttons'); return; }
+
+                    const known = _triviaCache[cacheKey];
+                    let pick    = null;
+
+                    if (known) {
+                        pick = btns.find(b => b.label === known);
+                        // Simulate reading even for known answers — humans still scan the options
+                        await sleep(1500 + Math.random() * 2500);
+                        if (pick) log('info', `[TRIVIA] Known: '${pick.label}' (${category})`);
+                    }
+
+                    if (!pick) {
+                        // Unknown — simulate thinking (longer, more variable delay)
+                        await sleep(3500 + Math.random() * 4500);
+                        pick = btns[Math.floor(Math.random() * btns.length)];
+                        log('info', `[TRIVIA] Guessing '${pick.label}' (${category || 'unknown'})`);
+                    }
+
+                    const triviaOk = await clickButton(res, pick.label);
+                    if (!triviaOk) { log('warn', '[TRIVIA] Click failed after retry'); return; }
+
+                    // Wait for Discord to highlight the correct answer, then learn it
+                    if (question) {
+                        await sleep(1000 + Math.random() * 500);
+                        try {
+                            const updated = await channel.messages.fetch(res.id);
+                            const correct = getButtons(updated).find(b => b.style === 3 || b.style === 'SUCCESS');
+                            if (correct && _triviaCache[cacheKey] !== correct.label) {
+                                _triviaCache[cacheKey] = correct.label;
+                                saveTriviaCache();
+                                const wasRight = correct.label === pick.label;
+                                log('info', `[TRIVIA] ${wasRight ? '✓' : '✗'} Answer: '${correct.label}' — ${wasRight ? 'correct' : 'was wrong, cached for next time'}`);
+                            }
+                        } catch {}
+                    }
+                });
+            }
+            await sleep(cd('trivia_cooldown'));
+        }
+    }
+
+    // ── Stream loop ────────────────────────────────────────────────────
+    // Pick a "favourite" game at startup — rotates every few days worth of sessions
+    let _streamPreferredGame = Math.floor(Math.random() * 25);
+
+    async function streamLoop() {
+        await sleep(37000);
+        while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
+            if (_cfg.commands_enabled?.stream) {
+                await runWithLock(async () => {
+                    const res = await sendAndWait(channel, 'pls stream', 12);
+                    if (!res) { log('warn', '[STREAM] No response'); return; }
+                    if (isPremiumCooldown(res)) { log('warn', '[STREAM] Premium cooldown — skipping'); return; }
+
+                    const embed  = res.embeds[0]?.toJSON?.() || res.embeds[0] || {};
+                    const fields = embed.fields || [];
+                    const field2 = (fields[1]?.name || fields[0]?.name || '').toLowerCase();
+
+                    // Note the trending game but don't blindly follow it every time
+                    if ((embed.title || '').includes('Trending Game')) {
+                        const m = (embed.description || '').match(/\*\*(.*?)\*\*/);
+                        if (m) log('info', `[STREAM] Trending game is '${m[1]}' — noted`);
+                        return;
+                    }
+
+                    // Already live — scroll through chat naturally
+                    if (field2.includes('live since')) {
+                        await sleep(1000 + Math.random() * 1500);
+                        const chatBtn = getButtons(res).find(b => /read chat|chat/i.test(b.label || ''));
+                        if (chatBtn) {
+                            const chatOk = await clickButton(res, chatBtn.label);
+                            if (chatOk) log('info', '[STREAM] ✓ Read Chat');
+                        }
+                        return;
+                    }
+
+                    // Not live — pause as if deciding to go live, then proceed
+                    await sleep(1500 + Math.random() * 2000);
+                    const goBtn = getButtons(res).find(b => /go live/i.test(b.label || ''));
+                    if (!goBtn) { log('warn', '[STREAM] No "Go Live" button found'); return; }
+                    const liveOk = await clickButton(res, goBtn.label);
+                    if (!liveOk) { log('warn', '[STREAM] Go Live failed after retry'); return; }
+                    log('info', '[STREAM] Going live…');
+
+                    // Wait for the game-select UI to appear
+                    await sleep(3000 + Math.random() * 1500);
+                    let updated = res;
+                    try { updated = await channel.messages.fetch(res.id); } catch {}
+
+                    const menuRows = getMenuRows(updated);
+                    if (menuRows.length) {
+                        const { rowIndex, menu } = menuRows[0];
+                        const opts = menu.options || [];
+                        if (opts.length) {
+                            // 70 % chance to pick preferred game, 30 % drift to a nearby option
+                            const base  = Math.min(_streamPreferredGame, opts.length - 1);
+                            const drift = Math.random() < 0.3 ? Math.floor(Math.random() * 3) - 1 : 0;
+                            const idx   = Math.max(0, Math.min(opts.length - 1, base + drift));
+                            // Occasionally update preferred to drift value to simulate taste change
+                            if (drift !== 0 && Math.random() < 0.15) _streamPreferredGame = idx;
+
+                            await sleep(800 + Math.random() * 1200); // scroll time
+                            try {
+                                await updated.selectMenu(rowIndex, [opts[idx].value]);
+                                log('info', `[STREAM] ✓ Selected game '${opts[idx].label}'`);
+                            } catch (e) { log('warn', `[STREAM] Game select: ${e.message}`); }
+                            await sleep(600 + Math.random() * 600);
+                            try { updated = await channel.messages.fetch(res.id); } catch {}
+                        }
+                    }
+
+                    // Click through any confirm/next/start buttons with short human pauses
+                    for (const label of ['Confirm', 'Next', 'Start', 'Go Live']) {
+                        await sleep(600 + Math.random() * 800);
+                        const clicked = await clickButtonPrefix(updated, label);
+                        if (clicked) {
+                            log('info', `[STREAM] ✓ '${clicked}'`);
+                            try { updated = await channel.messages.fetch(res.id); } catch {}
+                        }
+                    }
+                });
+            }
+            await sleep(cd('stream_cooldown'));
+        }
+    }
+
+    // ── Pet care loop ──────────────────────────────────────────────────
+    async function petLoop() {
+        await sleep(40000);
+        while (true) {
+            if (_botPaused) { await sleep(5000); continue; }
+            if (_cfg.commands_enabled?.pet) {
+                await runWithLock(async () => {
+                    const res = await sendAndWait(channel, 'pls pets care', 12);
+                    if (!res) { log('warn', '[PET] No response'); return; }
+                    if (isPremiumCooldown(res)) { log('warn', '[PET] Premium cooldown — skipping'); return; }
+
+                    const menuRows = getMenuRows(res);
+                    if (!menuRows.length) { log('warn', '[PET] No pet select menu'); return; }
+
+                    const { rowIndex: petRow, menu } = menuRows[0];
+                    const petOptions = menu.options || [];
+                    log('info', `[PET] Checking ${petOptions.length} pet(s)`);
+
+                    for (const petOpt of petOptions) {
+                        // Small pause between pets — flicking through the dropdown
+                        await sleep(700 + Math.random() * 800);
+                        try { await res.selectMenu(petRow, [petOpt.value]); }
+                        catch (e) { log('warn', `[PET] Select '${petOpt.label}': ${e.message}`); continue; }
+                        await sleep(900 + Math.random() * 600);
+
+                        let updated = res;
+                        try { updated = await channel.messages.fetch(res.id); } catch {}
+
+                        const btns = getButtons(updated);
+                        // Skip this pet entirely if all care buttons are disabled (fully cared)
+                        const hasActive = btns.slice(0, 3).some(b => b && !b.disabled);
+                        if (!hasActive) { log('info', `[PET] '${petOpt.label}' is already happy — skipping`); continue; }
+
+                        for (let i = 0; i < Math.min(btns.length, 3); i++) {
+                            const btn = btns[i];
+                            if (!btn || btn.disabled) continue;
+
+                            const embed = updated.embeds[0]?.toJSON?.() || updated.embeds[0] || {};
+                            const field = (embed.fields || [])[i];
+                            let pct     = parseInt(field?.value?.match(/\((\d+)%\)/)?.[1] ?? '100');
+
+                            if (pct >= 90) continue; // already high enough
+
+                            let clicks = 0;
+                            while (pct < 90 && clicks < 15) {
+                                await sleep(400 + Math.random() * 400);
+                                const careOk = await clickButton(updated, btn.label);
+                                if (!careOk) { log('warn', `[PET] Care click failed: '${btn.label}'`); break; }
+                                clicks++;
+                                if (i === 2) break; // Play: one trigger is enough per round
+                                await sleep(500 + Math.random() * 300);
+                                try { updated = await channel.messages.fetch(res.id); } catch { break; }
+                                const updField = ((updated.embeds[0]?.toJSON?.() || updated.embeds[0] || {}).fields || [])[i];
+                                pct = parseInt(updField?.value?.match(/\((\d+)%\)/)?.[1] ?? '100');
+                            }
+                            if (clicks) log('info', `[PET] '${petOpt.label}' stat[${i}] → ${pct}% (${clicks}×)`);
+                        }
+                    }
+                });
+            }
+            await sleep(cd('pet_cooldown'));
+        }
+    }
+
+    // ── Global event handler: captcha, alerts, auto-buy, minigames ──────
+    client.on('messageCreate', async (msg) => {
+        if (String(msg.channelId) !== CHANNEL_ID) return;
+        if (String(msg.author.id) !== BOT_ID) return;
+
+        // ── 1. CAPTCHA — pause bot immediately ───────────────────────────
+        for (const embed of (msg.embeds || [])) {
+            if ((embed.title || '').toUpperCase().includes('CAPTCHA')) {
+                log('warn', '[CAPTCHA] CAPTCHA detected — pausing bot! Solve it manually.');
+                setPaused(true);
+                return;
+            }
+        }
+
+        // ── 2. Unread alert notification ─────────────────────────────────
+        for (const embed of (msg.embeds || [])) {
+            if ((embed.title || '').includes('You have an unread alert')) {
+                if ((msg.content || '').includes(`<@${client.user.id}>`)) {
+                    log('info', '[ALERT] Unread alert detected — running pls alert');
+                    await sleep(1000 + Math.random() * 500);
+                    await sendAndWait(channel, 'pls alert', 8);
+                    return;
+                }
+            }
+        }
+
+        // ── 3. Auto-buy missing tools ─────────────────────────────────────
+        for (const embed of (msg.embeds || [])) {
+            const desc = embed.description || '';
+            if (desc.includes("You don't have a shovel")) {
+                log('warn', '[AUTOBUY] Missing shovel — buying one');
+                setTimeout(async () => {
+                    await runWithLock(async () => {
+                        await sendAndWait(channel, 'pls withdraw 35000', 10);
+                        await sleep(800);
+                        await sendAndWait(channel, 'pls shop buy shovel 1', 10);
+                    });
+                }, 1500);
+                return;
+            }
+            if (desc.includes("You don't have a hunting rifle")) {
+                log('warn', '[AUTOBUY] Missing hunting rifle — buying one');
+                setTimeout(async () => {
+                    await runWithLock(async () => {
+                        await sendAndWait(channel, 'pls withdraw 35000', 10);
+                        await sleep(800);
+                        await sendAndWait(channel, 'pls shop buy hunting rifle 1', 10);
+                    });
+                }, 1500);
+                return;
+            }
+            if (desc.includes("You don't have a fishing pole")) {
+                log('warn', '[AUTOBUY] Missing fishing pole — buying one');
+                setTimeout(async () => {
+                    await runWithLock(async () => {
+                        await sendAndWait(channel, 'pls withdraw 35000', 10);
+                        await sleep(800);
+                        await sendAndWait(channel, 'pls shop buy fishing pole 1', 10);
+                    });
+                }, 1500);
+                return;
+            }
+        }
+
+        // ── 4. Minigames — only our own interaction responses ─────────────
+        if (!msg.interaction || String(msg.interaction.user?.id) !== String(client.user.id)) return;
+
+        for (const embed of (msg.embeds || [])) {
+            const desc = embed.description || '';
+
+            // Color match: memorise word→color pairs, wait 6s, then click the right button
+            if (desc.includes('Look at each color next to the words closely!')) {
+                try {
+                    const colorMap = {};
+                    for (const line of desc.split('\n').slice(1)) {
+                        const word  = line.match(/`(.+?)`/)?.[1];
+                        const color = line.match(/:([^:\n]+):/)?.[1];
+                        if (word && color) colorMap[word] = color;
+                    }
+                    log('info', '[MINIGAME] Color match — waiting 6s');
+                    await sleep(6000);
+                    let updated = msg;
+                    try { updated = await channel.messages.fetch(msg.id); } catch {}
+                    const targetWord = (updated.embeds[0]?.description || '').match(/`(.+?)`/)?.[1];
+                    if (targetWord && colorMap[targetWord]) {
+                        const targetColor = colorMap[targetWord];
+                        for (const btn of getButtons(updated)) {
+                            if ((btn.label || '').toLowerCase() === targetColor.toLowerCase()) {
+                                log('info', `[MINIGAME] Color match → '${btn.label}'`);
+                                try { await updated.clickButton(btn.customId); } catch (e) { log('warn', `[MINIGAME] Color click: ${e.message}`); }
+                                return;
+                            }
+                        }
+                    }
+                } catch (e) { log('warn', `[MINIGAME] Color match error: ${e.message}`); }
+                return;
+            }
+
+            // Emoji match: remember the emoji shown, wait 4s, click matching button
+            if (desc.includes('Look at the emoji closely!')) {
+                try {
+                    const targetEmoji = desc.split('\n')[1]?.trim() || '';
+                    log('info', `[MINIGAME] Emoji match — waiting 4s (target: ${targetEmoji})`);
+                    await sleep(4000);
+                    let updated = msg;
+                    try { updated = await channel.messages.fetch(msg.id); } catch {}
+                    const btns = getButtons(updated);
+                    let clicked = false;
+                    for (const btn of btns) {
+                        const e = btn.emoji;
+                        const eStr = e ? (e.id ? `<${e.animated ? 'a' : ''}:${e.name}:${e.id}>` : (e.name || '')) : '';
+                        if (eStr && targetEmoji.includes(eStr)) {
+                            log('info', `[MINIGAME] Emoji match → clicking button`);
+                            try { await updated.clickButton(btn.customId); } catch (err) { log('warn', `[MINIGAME] Emoji click: ${err.message}`); }
+                            clicked = true;
+                            break;
+                        }
+                    }
+                    if (!clicked && btns.length) {
+                        log('info', '[MINIGAME] Emoji fallback → first button');
+                        try { await updated.clickButton(btns[0].customId); } catch {}
+                    }
+                } catch (e) { log('warn', `[MINIGAME] Emoji match error: ${e.message}`); }
+                return;
+            }
+
+            // Repeat order: remember sequence, wait 6s, click buttons in order
+            if (/repeat order|word order|words order/i.test(desc)) {
+                try {
+                    const order = desc.split('\n').slice(1, 6)
+                        .map(l => l.replace(/^`|`$/g, '').trim()).filter(Boolean);
+                    log('info', `[MINIGAME] Repeat order — waiting 6s (${order.join(' → ')})`);
+                    await sleep(6000);
+                    let updated = msg;
+                    try { updated = await channel.messages.fetch(msg.id); } catch {}
+                    const btnMap = Object.fromEntries(getButtons(updated).map(b => [b.label, b]));
+                    for (const word of order) {
+                        const btn = btnMap[word];
+                        if (btn) {
+                            log('info', `[MINIGAME] Order → clicking '${word}'`);
+                            try { await updated.clickButton(btn.customId); } catch (e) { log('warn', `[MINIGAME] Order click: ${e.message}`); }
+                            await sleep(500);
+                        }
+                    }
+                } catch (e) { log('warn', `[MINIGAME] Repeat order error: ${e.message}`); }
+                return;
+            }
+
+            // Attack boss: spam the first button 16 times
+            if (desc.includes('Attack the boss by clicking')) {
+                log('info', '[MINIGAME] Attack boss — spamming click');
+                const btns = getButtons(msg);
+                if (btns.length) {
+                    for (let i = 0; i < 16; i++) {
+                        try { await msg.clickButton(btns[0].customId); } catch {}
+                        await sleep(500);
+                    }
+                }
+                return;
+            }
+
+            // F in the chat
+            if (desc.trim() === 'F') {
+                log('info', '[MINIGAME] F in the chat');
+                const btns = getButtons(msg);
+                if (btns.length) try { await msg.clickButton(btns[0].customId); } catch {}
+                return;
+            }
+        }
+    });
+
     Promise.all([
         configReloadLoop(), heartbeatLoop(),
         cycleLoop(),
         begLoop(), searchLoop(), digLoop(), huntLoop(), crimeLoop(), hlLoop(), pmLoop(),
         advLoop(),
         fishLoop(), transferLoop(),
+        dailyLoop(), workLoop(), depositLoop(),
+        triviaLoop(), streamLoop(), petLoop(),
         marketSniperLoop(), mothershipMarketLoop(),
         studyMarketView(),
     ]).catch(e => log('error', `Fatal: ${e.message}`));
