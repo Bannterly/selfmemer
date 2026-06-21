@@ -74,7 +74,6 @@ const _cfg = {
         fish: false, daily: false, work: false, deposit: false,
         trivia: false, stream: false, pet: false,
                 }, config.commands_enabled || {}),
-    },
 };
 
 function log(level, msg) {
